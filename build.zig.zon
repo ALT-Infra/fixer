@@ -1,0 +1,10 @@
+.{
+    .name = .fixer,
+    .fingerprint = 0x6a1d7b63cf59e57d,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    // This repository is assembled from a Git checkout with its pinned
+    // submodule initialized. It is not a standalone Zig package archive.
+    .paths = .{ "build.zig", "build.zig.zon", ".zigversion", "src", "LICENSE", "PROVENANCE.md" },
+}

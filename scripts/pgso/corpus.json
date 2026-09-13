@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "defaults": {
+    "cwd": "tests/e2e",
+    "env_set": { "FX_AUTO_UPGRADE": "0", "FX_SOUND": "0" },
+    "env_unset": ["AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN"],
+    "timeout_seconds": 1800,
+    "requires_tmux": true
+  },
+  "scenarios": [],
+  "verification_scenarios": [
+    {
+      "name": "verify-tui-orchestration-extension",
+      "argv": ["bun", "test", "--max-concurrency", "1", "./tui-orchestration-extension.test.ts"],
+      "test_file": "tui-orchestration-extension.test.ts",
+      "env_set": {"FX_ORCHESTRATION_E2E": "1", "FX_REQUIRE_TMUX": "1"}
+    }
+  ],
+  "intentional_exclusions": {
+    "tui-orchestration-live.test.ts": "Requires real OpenCode credentials, live provider responses, and explicit opt-in."
+  }
+}
