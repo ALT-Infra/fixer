@@ -51,7 +51,7 @@ jobs:
           cache-key: full-ci-native-${{ matrix.platform.name }}-${{ matrix.optimize }}
 
       - name: Check formatting
-        run: zig fmt --check build.zig src/
+        run: zig fmt --check *.zig domain/
 
       - name: Check source boundary and dependency pin
         run: python3 scripts/check-layout.py

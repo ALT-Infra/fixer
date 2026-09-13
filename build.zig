@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         b.fmt("-Dtarget={s}", .{target.zigTriple(b.allocator) catch @panic("OOM")}),
         b.fmt("-Dcpu={s}", .{target.serializeCpuAlloc(b.allocator) catch @panic("OOM")}),
         "-Dorchestration=custom",
-        b.fmt("-Dorchestration-root={s}", .{b.path("src/extension.zig").getPath(b)}),
+        b.fmt("-Dorchestration-root={s}", .{b.path("extension.zig").getPath(b)}),
     };
 
     // The pinned host owns compiler flags, module wiring, and test collection.

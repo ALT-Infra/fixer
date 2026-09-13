@@ -8,7 +8,7 @@ Repository names stay stable when either revision changes.
 
 | Change | Owner |
 | --- | --- |
-| Teams, editor, coordination, projections, outcome validation | Fixer `src/` |
+| Teams, editor, coordination, projections, outcome validation | Root Zig files and `domain/` |
 | Agent runs, permissions, tools, providers, sessions, rendering | fx support fork |
 | Typed host API and lifecycle guarantees | fx `src/core/orchestration/` |
 | Product scenarios and assembled product verification | Fixer `tests/` and CI |
@@ -23,7 +23,7 @@ focused on assembly. If fx needs a new capability, implement that capability
 in the support fork and expose a typed contract before using it here.
 
 The `vendor/fx/fixer/` directory belongs to the historical pinned checkout.
-New Fixer development happens only in this repository's `src/`. Keeping the
+New Fixer development happens in this repository's root Zig files and `domain/`. Keeping the
 snapshot allows the support baseline to retain its original tests without
 making the support fork depend on a moving Fixer repository.
 
@@ -32,7 +32,7 @@ making the support fork depend on a moving Fixer repository.
 ```sh
 git submodule update --init
 python3 scripts/check-layout.py
-zig fmt build.zig src/
+zig fmt *.zig domain/
 zig build test -Doptimize=ReleaseSafe
 zig build test-e2e -Doptimize=ReleaseSafe
 ```

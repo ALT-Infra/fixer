@@ -27,7 +27,7 @@ offline once the pinned host and compiler are present. `zig build run`
 also builds and launches the assembled application.
 
 The build delegates to the pinned host with `-Dorchestration=custom` and
-this repository's `src/extension.zig`. fx compiles the binary and installs
+this repository's `extension.zig`. fx compiles the binary and installs
 it in `vendor/fx/zig-out`; the wrapper installs that same binary at
 `./zig-out/bin/fx`. The host's bundled Fixer source is a historical snapshot
 and is not selected by this build. No installed copy on PATH is used.
@@ -73,7 +73,7 @@ credentials are needed.
 
 ```sh
 python3 scripts/check-layout.py
-zig fmt --check build.zig src/
+zig fmt --check *.zig domain/
 zig build test -Doptimize=ReleaseSafe
 zig build test-e2e -Doptimize=ReleaseSafe
 ```

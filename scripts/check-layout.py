@@ -7,19 +7,20 @@ import re
 import subprocess
 
 root = Path(__file__).resolve().parents[1]
-source = root / "src"
+sources = set(root.glob("*.zig")) - {root / "build.zig"}
+sources.update((root / "domain").rglob("*.zig"))
 
 
 def git(*args: str, cwd: Path = root) -> str:
     return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
 
 
-for path in source.rglob("*.zig"):
+for path in sources:
     for imported in re.findall(r'@import\("([^\"]+)"\)', path.read_text()):
         if imported in {"std", "fx_orchestration_host"}:
             continue
         dependency = (path.parent / imported).resolve()
-        if not dependency.is_relative_to(source) or not dependency.is_file():
+        if dependency not in sources:
             raise SystemExit(f"{path.relative_to(root)} imports outside Fixer's boundary: {imported}")
 
 entry = git("ls-files", "--stage", "vendor/fx").split()

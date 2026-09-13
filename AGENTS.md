@@ -3,10 +3,47 @@
 Fixer is a Zig orchestration extension assembled with the pinned fx support
 fork in `vendor/fx`. Respect fx's existing contracts and runtime conventions.
 
+## Design principle: respect the host
+
+Fixer should extend fx while preserving the host's ownership boundaries,
+execution paths, conventions, and guarantees. An fx maintainer should be
+able to recognize the native design and understand where Fixer attaches to it.
+
+Treat upstream's design as the starting point. Before implementing a feature,
+read the closest native behavior and follow its call path. The pinned host
+defines the interfaces available to Fixer today; upstream is the reference
+when maintaining or extending that host.
+
+Non-invasive integration is about the reach and consequences of a change,
+not its line count. Prefer a few explicit contracts and clear ownership over
+hidden coupling, indirect workarounds, or a second execution path. Additional
+code is justified when it makes lifetimes, authority, or failure handling correct.
+
+- Keep Team semantics and coordination policy in Fixer. Use fx's native
+  execution, tools, permissions, persistence, and rendering mechanisms.
+- Preserve the full guarantees of those mechanisms, including canonical
+  user-input authority, permission checks, cancellation, resource ownership,
+  session continuity, and useful error propagation.
+- Reuse code only when its semantics fit. Sharing mutable state across
+  independent runs is not safe reuse. Different lifecycles may justify
+  separate adapters even when some code looks similar.
+- When fx lacks a capability that Fixer actually needs, extend the appropriate
+  host-owned service through a small typed contract. A necessary host fix is
+  preferable to a product-side workaround that duplicates native behavior.
+- Let concrete requirements justify abstractions. Avoid speculative plugin
+  frameworks, broad refactors, and unrelated cleanup during feature work.
+- Keep host changes cohesive and understandable on their own so upstream
+  maintenance does not require reconstructing Fixer's product logic.
+
+In change summaries, explain which module owns the behavior, which native
+mechanism was reused, why any host change was necessary, and how the relevant
+guarantees were verified. Explain the reasoning; a small diff alone is not
+evidence of a good integration.
+
 ## Ownership
 
-- `src/` owns Team definitions, the Team editor, coordination, projections,
-  and Fixer's protocol and presentation policy.
+- The root Zig files and `domain/` own Team definitions, the Team editor,
+  coordination, projections, and Fixer's protocol and presentation policy.
 - `vendor/fx` owns the host contract, agent execution, providers, permissions,
   tools, persistence, and terminal rendering. Change the support fork in its
   own repository, then update this repository's submodule pin deliberately.
@@ -14,12 +51,12 @@ fork in `vendor/fx`. Respect fx's existing contracts and runtime conventions.
   `fx_orchestration_host` module. Do not import private host implementation.
 - The host owns the sole definition of the contract. Do not copy it here.
 - The bundled `vendor/fx/fixer/` directory is a historical snapshot. This
-  repository's build always selects `src/extension.zig` through custom mode.
+  repository's build always selects `extension.zig` through custom mode.
 
 ## Development
 
 Use the exact compiler in `.zigversion`. Initialize dependencies with
-`git submodule update --init`. Run `zig fmt --check build.zig src/`,
+`git submodule update --init`. Run `zig fmt --check *.zig domain/`,
 `zig build test -Doptimize=ReleaseSafe`, and
 `zig build test-e2e -Doptimize=ReleaseSafe` for focused verification.
 The full host unit and deterministic E2E suites belong in Full CI.

@@ -3,7 +3,8 @@
 Fixer was extracted from the `fixer/` directory of the fx support fork at
 `e7967795759b403c518ef015ce613a0171a08415` on 2026-09-13.
 
-The source files now live in `src/`. Their contents are unchanged by extraction.
+The source files live at the repository root and under `domain/`.
+Their contents are unchanged by extraction.
 The Git history retains commits for the original `fixer/` subtree. Earlier
 history, including the former ALT name, remains in the support fork.
 
