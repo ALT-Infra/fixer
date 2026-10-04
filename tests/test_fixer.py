@@ -1,0 +1,418 @@
+"""Unit tests. Parsers run against real CLI output saved in tests/fixtures.
+
+Server behavior uses a stand-in CLI (fake_member.py) that can keep a
+session. These tests prove the protocol, the Team rules, and the limits.
+tests/test_live.py proves that each runner works with a real model.
+"""
+
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "tests" / "fixtures"
+FAKE = str(ROOT / "tests" / "fake_member.py")
+sys.path.insert(0, str(ROOT))
+import fixer  # noqa: E402
+
+
+class FakeAdapter(fixer.Adapter):
+    name = "fake"
+    sessions = True
+
+    def invoke(self, call):
+        argv = [sys.executable, FAKE, call.member.model]
+        if call.resume:
+            argv += ["--resume", call.session]
+        elif call.keep:
+            argv += ["--new"]
+        if not call.member.read_only:
+            argv += ["--writes"]
+        return fixer.Invocation(argv, stdin=call.prompt)
+
+    def parse(self, stdout, call):
+        result = json.loads(stdout)
+        return result["answer"], result["session"]
+
+
+fixer.ADAPTERS["fake"] = FakeAdapter()
+
+TEAM = """
+name = "test"
+
+[members.reviewer]
+kind = "peer"
+runner = "fake"
+model = "model-a"
+description = "Reviews changes."
+instructions = "Be blunt."
+
+[members.scout]
+kind = "specialist"
+runner = "fake"
+model = "model-b"
+description = "Finds things."
+"""
+
+
+def write_team(directory: Path, body: str) -> Path:
+    path = directory / "team.toml"
+    path.write_text(textwrap.dedent(body))
+    return path
+
+
+def call(member, model="m", read_only=True, kind="specialist"):
+    return fixer.Member(id=member, kind=kind, runner="x", model=model, description="d", read_only=read_only)
+
+
+class TeamFileTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+
+    def load(self, body):
+        return fixer.load_team(write_team(self.dir, body))
+
+    def rejected(self, body, fragment):
+        with self.assertRaises(fixer.TeamError) as caught:
+            self.load(body)
+        self.assertIn(fragment, str(caught.exception))
+
+    def test_team_loads(self):
+        team = self.load(TEAM)
+        self.assertEqual(team.members["reviewer"].kind, "peer")
+        self.assertTrue(team.members["scout"].read_only)
+
+    def test_unknown_keys_are_rejected(self):
+        self.rejected(TEAM.replace('model = "model-b"', 'model = "model-b"\nconsults = ["reviewer"]'),
+                      "unknown key(s) consults")
+
+    def test_kind_is_required_and_checked(self):
+        self.rejected(TEAM.replace('kind = "specialist"\n', ""), "missing 'kind'")
+        self.rejected(TEAM.replace('kind = "specialist"', 'kind = "boss"'), "'peer' or 'specialist'")
+
+    def test_unknown_runner_names_the_known_ones(self):
+        self.rejected(TEAM.replace('runner = "fake"\nmodel = "model-b"', 'runner = "nope"\nmodel = "model-b"'),
+                      "known: claude, cline, codex, cursor, fake, fx, opencode")
+
+    def test_a_peer_needs_a_runner_that_can_resume(self):
+        self.rejected('[members.p]\nkind = "peer"\nrunner = "cline"\nmodel = "m"\ndescription = "d"\n',
+                      "can run specialists only")
+
+    def test_custom_commands_run_read_only_specialists(self):
+        team = self.load('[commands]\nmine = ["my-cli", "--model", "{model}"]\n'
+                         '[members.s]\nkind = "specialist"\nrunner = "mine"\nmodel = "m"\ndescription = "d"\n')
+        self.assertEqual(team.adapter(team.members["s"]).template, ("my-cli", "--model", "{model}"))
+        self.rejected('[commands]\nmine = ["my-cli"]\n'
+                      '[members.s]\nkind = "specialist"\nrunner = "mine"\nmodel = "m"\ndescription = "d"\nread_only = false\n',
+                      "has no write mode")
+        self.rejected('[commands]\nclaude = ["x"]\n[members.s]\nkind = "specialist"\nrunner = "claude"\nmodel = "m"\ndescription = "d"\n',
+                      "built-in runner")
+
+    def test_ids(self):
+        self.rejected('[members.primary]\nkind = "specialist"\nrunner = "fake"\nmodel = "m"\ndescription = "d"\n', "host agent")
+        self.rejected('[members.Bad]\nkind = "specialist"\nrunner = "fake"\nmodel = "m"\ndescription = "d"\n', "lowercase")
+        self.load('[members.engineering_checkup]\nkind = "specialist"\nrunner = "fake"\nmodel = "m"\ndescription = "d"\n')
+
+    def test_example_team_is_valid(self):
+        team = fixer.load_team(ROOT / "team.example.toml")
+        self.assertEqual({m.kind for m in team.members.values()}, {"peer", "specialist"})
+
+
+class AdapterTests(unittest.TestCase):
+    """Command lines for each mode, and parsing of real CLI output."""
+
+    def invoke(self, name, member, session=None, resume=False, keep=False):
+        c = fixer.Call(member, "PROMPT", session, resume, keep, 60)
+        return fixer.ADAPTERS[name].invoke(c), c
+
+    def test_claude(self):
+        adapter = fixer.ADAPTERS["claude"]
+        one, _ = self.invoke("claude", call("s"))
+        self.assertIn("--no-session-persistence", one.argv)
+        self.assertEqual(one.stdin, "PROMPT")
+        first, _ = self.invoke("claude", call("p", read_only=False), session="u-1", keep=True)
+        self.assertEqual(first.argv[first.argv.index("--session-id") + 1], "u-1")
+        self.assertIn("acceptEdits", first.argv)
+        later, c = self.invoke("claude", call("p"), session="u-1", resume=True, keep=True)
+        self.assertEqual(later.argv[later.argv.index("--resume") + 1], "u-1")
+        self.assertEqual(adapter.parse((FIXTURES / "claude.json").read_text(), c),
+                         ("PONG", "11111111-2222-4333-8444-555555555555"))
+        with self.assertRaises(fixer.MemberError):
+            adapter.parse('{"type":"result","is_error":true,"result":"Credit balance is too low"}', c)
+
+    def test_codex(self):
+        one, c = self.invoke("codex", call("s"))
+        self.assertEqual(one.argv[:2], ["codex", "exec"])
+        self.assertIn("--ephemeral", one.argv)
+        self.assertIn('sandbox_mode="read-only"', one.argv)
+        self.assertEqual((one.argv[-1], one.stdin), ("-", "PROMPT"))
+        later, _ = self.invoke("codex", call("p", read_only=False), session="t-1", resume=True, keep=True)
+        self.assertEqual(later.argv[:3], ["codex", "exec", "resume"])
+        self.assertEqual(later.argv[-2:], ["t-1", "-"])
+        self.assertIn('sandbox_mode="workspace-write"', later.argv)
+        self.assertNotIn("--ephemeral", later.argv)
+        answer, thread = fixer.ADAPTERS["codex"].parse((FIXTURES / "codex.jsonl").read_text(), c)
+        self.assertEqual((answer, thread), ("PONG", "01a1087e-6692-7d61-8d78-a9569f645292"))
+
+    def test_opencode(self):
+        one, c = self.invoke("opencode", call("s"))
+        self.assertEqual(one.argv[-1], "PROMPT")
+        self.assertEqual(one.argv[one.argv.index("--agent") + 1], "plan")
+        later, _ = self.invoke("opencode", call("p", read_only=False), session="ses_1", resume=True, keep=True)
+        self.assertEqual(later.argv[later.argv.index("--session") + 1], "ses_1")
+        self.assertNotIn("--agent", later.argv)
+        answer, session = fixer.ADAPTERS["opencode"].parse((FIXTURES / "opencode.jsonl").read_text(), c)
+        self.assertEqual(answer, "ZEBRA-41")
+        self.assertTrue(session.startswith("ses_"))
+
+    def test_cline(self):
+        one, c = self.invoke("cline", call("s"))
+        self.assertIn("--plan", one.argv)
+        write, _ = self.invoke("cline", call("w", read_only=False))
+        self.assertEqual(write.argv[write.argv.index("--auto-approve") + 1], "true")
+        self.assertEqual(fixer.ADAPTERS["cline"].parse((FIXTURES / "cline.jsonl").read_text(), c), ("OK", None))
+        with self.assertRaises(fixer.MemberError):
+            fixer.ADAPTERS["cline"].parse('{"type":"error","message":"Free model promotion ended"}', c)
+
+    def test_fx(self):
+        one, c = self.invoke("fx", call("s"))
+        self.assertIn("--no-save", one.argv)
+        later, _ = self.invoke("fx", call("p", read_only=False), session="abc", resume=True, keep=True)
+        self.assertEqual(later.argv[later.argv.index("--resume-id") + 1], "abc")
+        self.assertIn("--auto", later.argv)
+        self.assertEqual(fixer.ADAPTERS["fx"].parse((FIXTURES / "fx.json").read_text(), c), ("OK", "ncWnEvfmiGsE"))
+
+    def test_cursor_command_lines(self):
+        # No real Cursor output: Cursor is not tested with a real model.
+        one, _ = self.invoke("cursor", call("s"))
+        self.assertEqual(one.argv[one.argv.index("--mode") + 1], "ask")
+        later, _ = self.invoke("cursor", call("p", read_only=False), session="chat-1", resume=True, keep=True)
+        self.assertEqual(later.argv[later.argv.index("--resume") + 1], "chat-1")
+        self.assertIn("--force", later.argv)
+
+
+class Harness:
+    """Drives a Server in-process over line-delimited JSON-RPC."""
+
+    def __init__(self, team):
+        read_fd, write_fd = os.pipe()
+        self.to_server = os.fdopen(write_fd, "w")
+        self.from_host = os.fdopen(read_fd)
+        self.out = io.StringIO()
+        self.lock = threading.Lock()
+        self.server = fixer.Server(team, out=self)
+        self.thread = threading.Thread(target=self.server.serve, args=(self.from_host,), daemon=True)
+        self.thread.start()
+        self.next_id = 0
+
+    def write(self, text):
+        with self.lock:
+            self.out.write(text)
+
+    def flush(self):
+        pass
+
+    def messages(self):
+        with self.lock:
+            return [json.loads(line) for line in self.out.getvalue().splitlines() if line]
+
+    def send(self, method, params=None, notify=False):
+        message = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            message["params"] = params
+        if not notify:
+            self.next_id += 1
+            message["id"] = self.next_id
+        self.to_server.write(json.dumps(message) + "\n")
+        self.to_server.flush()
+        return message.get("id")
+
+    def wait(self, request_id, timeout=20):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for message in self.messages():
+                if message.get("id") == request_id:
+                    return message
+            time.sleep(0.02)
+        raise AssertionError(f"no response to {request_id}")
+
+    def call(self, name, **arguments):
+        return self.wait(self.send("tools/call", {"name": name, "arguments": arguments}))["result"]
+
+    def text(self, name, **arguments):
+        result = self.call(name, **arguments)
+        return result["content"][0]["text"], result["isError"]
+
+    def close(self):
+        self.to_server.close()
+        self.thread.join(timeout=10)
+        self.from_host.close()
+
+
+class ServerTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp()).resolve()
+        (self.dir / "sessions").mkdir()
+        self.env = {"FIXER_RUN_DIR": str(self.dir / "run"), "FAKE_SESSIONS": str(self.dir / "sessions")}
+        os.environ.update(self.env)
+        os.environ.pop("FIXER_MEMBER", None)
+        self.harness = None
+
+    def start(self, body=TEAM):
+        self.harness = Harness(fixer.load_team(write_team(self.dir, body)))
+        return self.harness
+
+    def tearDown(self):
+        if self.harness:
+            self.harness.close()
+        for name in self.env:
+            os.environ.pop(name, None)
+
+    def test_initialize_negotiates_protocol_version(self):
+        h = self.start()
+        self.assertEqual(h.wait(h.send("initialize", {"protocolVersion": "2025-03-26"}))["result"]["protocolVersion"], "2025-03-26")
+        self.assertEqual(h.wait(h.send("initialize", {"protocolVersion": "1999"}))["result"]["protocolVersion"],
+                         fixer.PROTOCOL_VERSIONS[0])
+
+    def test_one_tool_per_member_and_kind_in_description(self):
+        h = self.start()
+        tools = {t["name"]: t for t in h.wait(h.send("tools/list"))["result"]["tools"]}
+        self.assertEqual(set(tools), {"reviewer", "scout"})
+        self.assertIn("remembers your earlier calls", tools["reviewer"]["description"])
+        self.assertIn("Starts fresh on every call", tools["scout"]["description"])
+        self.assertIn("read-only", tools["scout"]["description"])
+
+    def test_specialist_call_carries_role_task_context_and_workspace(self):
+        h = self.start()
+        text, is_error = h.text("scout", task="Find the parser.", context="It reads TOML.")
+        self.assertFalse(is_error, text)
+        self.assertTrue(text.startswith("[scout · fake model-b · "))
+        for expected in ("Find the parser.", "It reads TOML.", "Do not modify files", "member=scout",
+                         f"cwd={os.getcwd()} pwd={os.getcwd()}"):
+            self.assertIn(expected, text)
+
+    def test_peer_keeps_its_session_and_specialist_does_not(self):
+        h = self.start()
+        first, _ = h.text("reviewer", task="first")
+        self.assertIn("remembered= ", first)
+        self.assertIn("This is the start of your conversation", first)
+        second, _ = h.text("reviewer", task="second")
+        self.assertIn("remembered=first ", second)
+        self.assertIn("A new request from the primary", second)
+        h.text("scout", task="alpha")
+        fresh, _ = h.text("scout", task="beta")
+        self.assertIn("remembered= ", fresh)
+
+    def test_parallel_calls_to_one_peer_take_turns(self):
+        h = self.start()
+        ids = [h.send("tools/call", {"name": "reviewer", "arguments": {"task": f"SLEEP 0.5 call-{n}"}}) for n in (1, 2)]
+        texts = [h.wait(i)["result"]["content"][0]["text"] for i in ids]
+        self.assertEqual(sum("remembered=SLEEP 0.5 call-" in t for t in texts), 1, texts)
+
+    def test_different_members_run_in_parallel(self):
+        h = self.start()
+        started = time.monotonic()
+        ids = [h.send("tools/call", {"name": n, "arguments": {"task": "SLEEP 1"}}) for n in ("reviewer", "scout")]
+        for i in ids:
+            self.assertFalse(h.wait(i)["result"]["isError"])
+        self.assertLess(time.monotonic() - started, 1.9)
+
+    def test_failures_are_tool_errors(self):
+        h = self.start()
+        text, is_error = h.text("scout", task="FAIL")
+        self.assertTrue(is_error)
+        self.assertIn("exit status 3", text)
+        self.assertIn("deliberate failure", text)
+        text, is_error = h.text("scout", task="SILENT")
+        self.assertTrue(is_error)
+        self.assertIn("no answer", text)
+        self.assertTrue(h.text("ghost", task="x")[1])
+        self.assertTrue(h.text("scout", task="  ")[1])
+
+    def test_a_failed_first_call_does_not_keep_a_session(self):
+        h = self.start()
+        self.assertTrue(h.text("reviewer", task="FAIL")[1])
+        text, _ = h.text("reviewer", task="again")
+        self.assertIn("This is the start of your conversation", text)
+
+    def test_cancellation_kills_the_member_and_sends_no_response(self):
+        h = self.start()
+        request_id = h.send("tools/call", {"name": "scout", "arguments": {"task": "SLEEP 30"}})
+        time.sleep(0.5)
+        h.send("notifications/cancelled", {"requestId": request_id}, notify=True)
+        time.sleep(1)
+        self.assertEqual(h.wait(h.send("ping"))["result"], {})
+        self.assertFalse(any(m.get("id") == request_id for m in h.messages()))
+        self.assertFalse(list((self.dir / "run").rglob("*.slot")))
+
+    def test_timeout(self):
+        h = self.start(TEAM.replace('model = "model-b"', 'model = "model-b"\ntimeout_seconds = 1'))
+        text, is_error = h.text("scout", task="SLEEP 10")
+        self.assertTrue(is_error)
+        self.assertIn("did not finish within 1s", text)
+
+    def test_max_active(self):
+        h = self.start("max_active = 1\n" + TEAM)
+        slow = h.send("tools/call", {"name": "reviewer", "arguments": {"task": "SLEEP 2"}})
+        time.sleep(0.5)
+        text, is_error = h.text("scout", task="hello")
+        self.assertTrue(is_error)
+        self.assertIn("already running", text)
+        self.assertFalse(h.wait(slow)["result"]["isError"])
+
+    def test_writes_flag(self):
+        h = self.start(TEAM.replace('model = "model-b"', 'model = "model-b"\nread_only = false'))
+        text, _ = h.text("scout", task="hello")
+        self.assertIn("writes=True", text)
+        self.assertNotIn("Do not modify files", text)
+
+    def test_no_tools_inside_a_member(self):
+        os.environ["FIXER_MEMBER"] = "reviewer"
+        try:
+            h = self.start()
+            self.assertEqual(h.wait(h.send("tools/list"))["result"]["tools"], [])
+            self.assertTrue(h.text("scout", task="x")[1])
+        finally:
+            os.environ.pop("FIXER_MEMBER", None)
+
+    def test_long_prompts_go_through_a_file_for_argv_runners(self):
+        body = ('[commands]\nargv = ["' + sys.executable + '", "-c", "import sys; print(sys.argv[1][:300])", "{prompt}"]\n'
+                '[members.s]\nkind = "specialist"\nrunner = "argv"\nmodel = "m"\ndescription = "d"\n')
+        h = self.start(body)
+        text, is_error = h.text("s", task="t", context="x" * (200 * 1024))
+        self.assertFalse(is_error, text)
+        self.assertIn("Your full request is in the file", text)
+
+    def test_malformed_requests_do_not_stop_the_server(self):
+        h = self.start()
+        h.to_server.write('not json\n{"jsonrpc":"2.0","id":7,"method":5}\n'
+                          '{"jsonrpc":"2.0","id":8,"method":"tools/list","params":[]}\n')
+        h.to_server.flush()
+        self.assertEqual(h.wait(7)["error"]["code"], -32600)
+        self.assertEqual(h.wait(8)["error"]["code"], -32600)
+        self.assertEqual(h.wait(h.send("resources/list"))["error"]["code"], -32601)
+        self.assertEqual(h.wait(h.send("ping"))["result"], {})
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_check(self):
+        good = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check", "--team", str(ROOT / "team.example.toml")],
+                              capture_output=True, text=True)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn("reviewer: peer, codex", good.stdout)
+        bad = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check", "--team", "/nonexistent/team.toml"],
+                             capture_output=True, text=True)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("no Team file", bad.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
