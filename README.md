@@ -1,41 +1,49 @@
 # Fixer
 
-Fixer gives the coding agent you already use a Team of models from other
-providers.
+Fixer gives your coding agent a Team of models from other providers.
 
-You write a Team file. Each member has a CLI, a model, and a role. Fixer is
-an MCP server: your agent sees one tool per member. A call runs that member
-through its own CLI, on its own model, in your workspace, and returns its
-answer as the tool result.
+Fixer is an MCP server. You write a Team file. Each member of the Team has
+a CLI, a model, and a role. Your agent gets one tool for each member. When
+your agent calls a tool, Fixer runs that member through the member's CLI,
+on the member's model, in your workspace. Fixer then gives the member's
+answer to your agent.
 
 ```
-you ─► your agent (the primary, for example Claude Code)
+you ─► host (for example Claude Code; its model is the primary)
          │ calls the tool "reviewer"
          ▼
-       fixer ─► codex exec -m gpt-5.5 ...   ─► answer back to the primary
+       fixer ─► codex exec -m gpt-5.5 ...   ─► answer to the primary
 ```
 
-Fixer has no agent loop and patches no host. Each member uses its CLI's
-own sign-in, tools, and permissions. Fixer is one file of standard-library
-Python.
+Fixer has no agent loop, and it does not change a host. Each member uses
+the sign-in, tools, and permissions of its own CLI. Fixer is one Python
+file. It uses only the standard library.
 
-## Two kinds of member
+## Terms
+
+| Term | Meaning |
+| --- | --- |
+| Host | The CLI that you type into. |
+| Primary | The model in the host. The primary calls the members. |
+| Member | One role in the Team. A member has a runner and a model. |
+| Runner | The CLI that runs a member. |
+
+## Peers and specialists
 
 | Kind | Memory |
 | --- | --- |
-| `peer` | Keeps one session with the primary. Each later call continues that session through the CLI's own resume. The session lasts while the Fixer server runs, which is normally the host session. |
-| `specialist` | Starts fresh on every call. |
+| `peer` | A peer keeps one session with the primary. Each new call continues that session through the resume function of the CLI. The session stops when the Fixer server stops, normally at the end of the host session. |
+| `specialist` | A specialist starts a new session for each call. |
 
-The tool description tells the primary which kind each member is, so it
-knows what to send. Members do not consult each other.
+The tool description tells the primary the kind of each member. Thus the
+primary knows what it must send. Members do not consult other members.
 
-## Support
+## Supported CLIs
 
-A CLI can be the **host** (where the primary runs) or a **member runner**
-(where Fixer runs a member). Results below come from real runs on
-2026-10-04.
+A CLI can be the host, a runner, or both. These results come from tests
+with real models on 2026-10-04.
 
-| CLI | As host | Specialist | Peer | Read-only blocks edits | Read-only blocks shell |
+| CLI | As host | Specialist | Peer | Read-only stops edits | Read-only stops shell commands |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code (`claude`) | tested | tested | tested | yes | yes |
 | Codex (`codex`) | tested | tested | tested | yes | yes |
@@ -44,101 +52,129 @@ A CLI can be the **host** (where the primary runs) or a **member runner**
 | Cline (`cline`) | not tested | tested | **not possible** | yes | **no** |
 | Cursor (`cursor-agent`) | not tested | not tested | not tested | — | — |
 
-- Cline cannot resume a session without a terminal, so it runs
-  specialists only.
-- On OpenCode and Cline, a read-only member can still run shell commands.
-  Give those members work where that is acceptable.
-- Cursor support follows its help text. It has not run with a real model.
+- Cline cannot continue a session without a terminal. Thus Cline can run
+  only specialists.
+- On OpenCode and Cline, a read-only member can run shell commands. Give
+  these members only tasks where this is safe.
+- Cursor support comes from its help text. Cursor did not run with a real
+  model.
+- The fx tests used fx 0.0.12 with a Cline connection. The fx runner uses
+  only standard fx flags.
 
-## Start
+## Install and configure
 
-You need Python 3.11 or later on macOS or Linux, and each member's CLI,
-installed and signed in.
+You need:
 
-1. Copy `team.example.toml` to `.fixer/team.toml` in your project. Edit it.
-   Then check it:
+- Python 3.11 or later, on macOS or Linux.
+- The CLI of each member, installed and signed in.
+
+Do these steps:
+
+1. Copy `team.example.toml` to `.fixer/team.toml` in your project.
+2. Edit `.fixer/team.toml`. The section [Team file](#team-file) gives the
+   keys.
+3. Check the file:
 
    ```sh
    python3 /path/to/fixer.py check
    ```
 
-2. Register Fixer in your host. Run the host from the project directory,
-   because Fixer finds `.fixer/team.toml` there and members work there.
+4. Add Fixer to your host:
 
    | Host | Command or file |
    | --- | --- |
    | Claude Code | `claude mcp add fixer -- python3 /path/to/fixer.py serve` |
    | Codex | `codex mcp add fixer -- python3 /path/to/fixer.py serve` |
    | OpenCode | `opencode.json`: `{"mcp": {"fixer": {"type": "local", "command": ["python3", "/path/to/fixer.py", "serve"]}}}` |
-   | fx | `.mcp.json`: `{"mcpServers": {"fixer": {"command": "python3", "args": ["/path/to/fixer.py", "serve"], "operation_timeout_ms": 900000}}}`, then `fx mcp trust approve fixer` |
+   | fx | `.mcp.json`: `{"mcpServers": {"fixer": {"command": "python3", "args": ["/path/to/fixer.py", "serve"], "operation_timeout_ms": 900000}}}`. Then run `fx mcp trust approve fixer`. |
 
-3. Allow enough time. A member call can take minutes.
+5. Start the host in the project directory. Fixer reads
+   `.fixer/team.toml` there, and the members work there.
+6. Increase the time limit of the host for MCP tools. One member call can
+   take some minutes.
    - Claude Code: set `MCP_TOOL_TIMEOUT=900000` (milliseconds).
    - Codex: in `~/.codex/config.toml`, under `[mcp_servers.fixer]`, set
      `tool_timeout_sec = 900`.
-   - fx: `operation_timeout_ms` in `.mcp.json`, as above.
+   - fx: set `operation_timeout_ms` in `.mcp.json`, as in step 4.
+7. Approve the Fixer tools. A host that runs without a terminal cannot ask
+   for approval, so approve the tools before you start it:
+   - `claude -p`: add `--allowedTools mcp__fixer`.
+   - `codex exec`: under `[mcp_servers.fixer]`, set
+     `default_tools_approval_mode = "approve"`.
 
-4. Approve Fixer's tools if your host asks. A headless host (for example
-   `claude -p`) cannot ask; allow the tools in advance, for example
-   `claude -p --allowedTools mcp__fixer`.
+Then use your host as usual. The primary calls a member in three cases:
 
-Then work as usual. The primary calls members when it decides to, when
-you ask it to, or when a rule in your instructions file tells it to.
+- The primary decides that the member can help.
+- You tell the primary to call the member.
+- A rule in your instructions file tells the primary to call the member.
 
 ## Team file
 
 ```toml
 name = "engineering"
 max_active = 4          # member runs at the same time
-timeout_seconds = 900   # for one call
+timeout_seconds = 900   # time limit for one call
 
 [members.reviewer]
 kind = "peer"
 runner = "codex"
 model = "gpt-5.5"
-description = "Independent reviewer. Pass the diff or name the files."
-instructions = "Find correctness bugs. Cite file:line."
-read_only = true        # the default
+description = "Independent reviewer. Give it the diff or the file names."
+instructions = "Find correctness bugs. Give file:line for each bug."
+read_only = true        # the default value
 ```
 
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `kind` | yes | `peer` or `specialist`. |
 | `runner` | yes | `claude`, `codex`, `opencode`, `fx`, `cursor`, `cline`, or a name from `[commands]`. |
-| `model` | yes | Passed to the runner's model flag. |
-| `description` | yes | Shown to the primary. Say when to call this member. |
-| `instructions` | no | The member's role, sent on the first call. |
-| `read_only` | no | `true` by default. `false` uses the runner's write mode. |
-| `timeout_seconds` | no | Overrides the Team value. |
+| `model` | yes | Fixer gives this value to the model flag of the runner. |
+| `description` | yes | The primary sees this text. Tell the primary when to call this member. |
+| `instructions` | no | The role of the member. Fixer sends it on the first call. |
+| `read_only` | no | `true` is the default. `false` selects the write mode of the runner. |
+| `timeout_seconds` | no | This value replaces the Team value for this member. |
 
-The tool name is the member id. Ids use lowercase letters, digits, `-`
-and `_`. Fixer rejects unknown keys, so a typo fails at `fixer check`.
+The tool name is the member id. An id has lowercase letters, digits, `-`,
+and `_`. Fixer refuses unknown keys. Thus `fixer check` finds a typing
+error before you start.
 
-`[commands]` adds another CLI for read-only specialists:
+`[commands]` adds a different CLI for read-only specialists:
 
 ```toml
 [commands]
 my-cli = ["my-cli", "--model", "{model}", "--quiet"]
 ```
 
-`{model}` is replaced. The prompt goes to stdin unless an argument contains
-`{prompt}`. The command must print only the answer.
+Fixer replaces `{model}`. Fixer sends the prompt on stdin, unless an
+argument contains `{prompt}`. The command must print only the answer.
 
 ## Safety and limits
 
-- `max_active` counts live member runs for each Team, across processes.
-- Each call has a time limit. When the host cancels a call or exits, Fixer
-  stops the member's whole process group.
-- Each member runs in the server's directory. Fixer sets both the working
-  directory and `PWD`: OpenCode follows `PWD`.
-- Fixer sets `FIXER_MEMBER` in each member's environment. If a member's CLI
-  loads Fixer from your settings, that Fixer offers no tools.
-- A prompt longer than 96 KiB goes to a temporary file that the member reads.
-- A member can read your workspace, the Team file included.
-- A member's answer is a claim. The primary is told to check it, but the
-  primary decides.
+- `max_active` sets the maximum number of member runs at the same time,
+  for each Team, across all processes.
+- Each call has a time limit. If the host stops a call, or if the host
+  itself stops, Fixer stops the process group of the member.
+- Each member works in the directory of the server. Fixer sets the working
+  directory and `PWD` to the same value, because OpenCode uses `PWD`.
+- Fixer sets `FIXER_MEMBER` for each member. If the CLI of a member loads
+  Fixer from your settings, that Fixer gives no tools.
+- If a prompt is longer than 96 KiB, Fixer writes it to a temporary file.
+  The member then reads the file.
+- A member can read all of your workspace. This includes the Team file.
 - `FIXER_LOG=/path` records each call as one JSON line: member, runner,
-  model, resumed or not, seconds, exit status.
+  model, resume or new session, seconds, and exit status.
+
+## Known problems
+
+- The answer of a member can be wrong. In one test, a peer gave a wrong
+  answer from its memory. The primary examined the answer and found the
+  error. Fixer tells the primary to examine each answer.
+- Free models can change without notice. During the tests, one Cline free
+  model stopped. Also, the OpenCode free tier started to refuse other
+  clients.
+- Peer sessions stop when the Fixer server stops. A host that starts a new
+  server for each request loses the sessions. Repeated `claude -p` calls
+  are an example.
 
 ## Tests
 
@@ -146,22 +182,70 @@ my-cli = ["my-cli", "--model", "{model}", "--quiet"]
 python3 -m unittest discover -s tests -v
 ```
 
-The unit tests check each adapter's command lines, parse real CLI output
-saved in `tests/fixtures/`, and check the server with a stand-in CLI.
+The unit tests examine the command lines of each adapter. They read real
+CLI output from `tests/fixtures/`. They test the server with a stand-in
+CLI.
 
-`tests/test_live.py` runs real CLIs on real models. For each runner it
-checks a one-time call, a peer session against a specialist, and
-read-only against write mode:
+`tests/test_live.py` runs real CLIs on real models. For each runner, it
+tests a one-time call, a peer session against a specialist, and read-only
+mode against write mode:
 
 ```sh
 FIXER_LIVE=claude,codex FIXER_LIVE_CLAUDE=claude-haiku-4-5-20251001 FIXER_LIVE_CODEX=gpt-6-luna \
   python3 -m unittest tests.test_live -v
 ```
 
+## Change Fixer
+
+Obey these rules:
+
+- Keep Fixer above the host. Use only MCP over stdio and the CLI of each
+  member. Do not import, change, or fork a CLI.
+- Put all details of one CLI in the adapter class of that CLI. The server
+  must not know a CLI by name.
+- Add a runner only with real tests. Run `tests/test_live.py` for the new
+  runner. Save one real output in `tests/fixtures/` for its parser test.
+- Use only the standard library.
+- Refuse unknown keys in the Team file. Add a key only for a real need.
+
+After a change, do these steps:
+
+1. Run the unit tests. All tests must pass.
+2. If you changed an adapter, run the live tests for that runner. The unit
+   tests use saved output, so they cannot show that the real CLI accepts
+   the flags.
+
+The adapters use these flags. The versions are the versions that Fixer
+was tested with.
+
+| CLI | Version | One-time call | Session | Read-only |
+| --- | --- | --- | --- | --- |
+| Claude Code | 2.1.289 | `-p --no-session-persistence` | `--session-id <uuid>`, then `--resume <uuid>` | default `-p` mode |
+| Codex | 0.160.0 | `exec --ephemeral` | id from `--json`, then `exec resume <id>` | `sandbox_mode="read-only"` |
+| OpenCode | 1.18.34 | `run` | id from `--format json`, then `--session <id>` | `--agent plan` |
+| fx | 0.0.12 | `ask --no-save` | id from `--json`, then `--resume-id <id>` | default mode |
+| Cline | 3.0.68 | `--json "<prompt>"` | not possible without a terminal | `--plan` |
+| Cursor | 2026.10.01 | `-p --output-format json` | `create-chat`, then `--resume <id>` | `--mode ask` |
+
+## Open items
+
+1. Test Cursor with a real account. A fault will probably be in its
+   adapter: a flag, a JSON field name, or session resume.
+2. Find a way for Cline peers. `cline --acp` keeps a live session. It is
+   not tested.
+3. Add an install command, so that users do not need a file path.
+
 ## History
 
-Fixer started as a Zig extension compiled into a fork of fx. That version
-is on the `main` branch. [docs/ANALYSIS.md](docs/ANALYSIS.md) records why
-it changed and what was tested.
+Fixer was first a Zig extension. It compiled into a fork of fx. That
+design was difficult to maintain, for three reasons:
+
+- Upstream fx changed very quickly: 987 commits in the 26 days after the
+  last sync.
+- Fixer connected below the agent loop. Thus most upstream changes broke
+  the fork.
+- Each change needed 24 CI jobs on four platforms.
+
+Commit `310ba91` is the last commit of the old design.
 
 Licensed under [Apache-2.0](LICENSE).
