@@ -1,0 +1,55 @@
+# A Fixer Team. Copy to .fixer/team.toml in your project and edit it.
+# Check it with: fixer check
+#
+# The agent you type into is the primary. It gets one tool per member, named
+# by the member's id. A call runs that member through its own CLI and model.
+#
+# kind = "peer"        keeps one session with the primary while the host
+#                      session lasts. Later calls continue that session.
+# kind = "specialist"  starts fresh on every call.
+#
+# runner: claude, codex, opencode, fx, cursor, or cline. Each member uses
+# its CLI's own sign-in. cline runs specialists only.
+
+name = "engineering"
+max_active = 4         # member runs at the same time, across the Team
+timeout_seconds = 900  # for one call; a member can set its own
+
+[members.reviewer]
+kind = "peer"
+runner = "codex"
+model = "gpt-5.5"
+description = "Independent reviewer on a different model. Ask before you call non-trivial work done. Pass the diff or name the files."
+instructions = """
+Review for correctness first: logic errors, unhandled cases, broken
+invariants, and claims the change does not support. Then risk: security,
+data loss, concurrency. Ignore style unless it hides a bug. Cite file:line
+for each finding. Say plainly when you find nothing.
+"""
+
+[members.scout]
+kind = "specialist"
+runner = "opencode"
+model = "opencode/nemotron-3.5-lightning-free"
+description = "Fast codebase search. Ask where something is defined or used, or what a module does."
+instructions = "Answer with file paths and line numbers. Read before you answer. Keep it short."
+
+[members.second_opinion]
+kind = "specialist"
+runner = "claude"
+model = "sonnet"
+description = "A second view on a design question. State the question and the options."
+
+# A member that may edit files. Its CLI's own permission rules still apply.
+# [members.implementer]
+# kind = "specialist"
+# runner = "cline"
+# model = "stealth/space-bunny-alpha"
+# description = "Makes a small, fully specified change."
+# read_only = false
+
+# Another CLI, for read-only specialists. "{model}" is replaced; the prompt
+# goes to stdin unless an argument contains "{prompt}". It must print only
+# the answer.
+# [commands]
+# my-cli = ["my-cli", "--model", "{model}", "--quiet"]
