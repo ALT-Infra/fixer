@@ -1,92 +1,167 @@
 # Fixer
 
-Fixer adds recursive multi-model Team orchestration to
-[fx](https://github.com/vercel-labs/fx). This repository owns the Team editor,
-coordination rules, specialist projections, and the protocol that returns
-results to their callers.
+Fixer gives the coding agent you already use a Team of models from other
+providers.
 
-The [fx support fork](https://github.com/ALT-Infra/fx) supplies the native
-terminal UI, model transports, credentials, permissions, tools, sessions,
-and background agent execution. It is pinned as the `vendor/fx` Git
-submodule. Fixer imports the host's `fx_orchestration_host` contract; it does
-not implement a second agent harness.
+You write a Team file. Each member has a CLI, a model, and a role. Fixer is
+an MCP server: your agent sees one tool per member. A call runs that member
+through its own CLI, on its own model, in your workspace, and returns its
+answer as the tool result.
 
-## Build and run
-
-Use **Zig 0.16.0**, the exact version recorded in `.zigversion`.
-
-```sh
-git clone --recurse-submodules https://github.com/ALT-Infra/fixer.git
-cd fixer
-zig build -Doptimize=ReleaseSafe
-./zig-out/bin/fx
+```
+you ─► your agent (the primary, for example Claude Code)
+         │ calls the tool "reviewer"
+         ▼
+       fixer ─► codex exec -m gpt-5.5 ...   ─► answer back to the primary
 ```
 
-For an existing clone, run `git submodule update --init` first. Builds work
-offline once the pinned host and compiler are present. `zig build run`
-also builds and launches the assembled application.
+Fixer has no agent loop and patches no host. Each member uses its CLI's
+own sign-in, tools, and permissions. Fixer is one file of standard-library
+Python.
 
-The build delegates to the pinned host with `-Dorchestration=custom` and
-this repository's `extension.zig`. fx compiles the binary and installs
-it in `vendor/fx/zig-out`; the wrapper installs that same binary at
-`./zig-out/bin/fx`. The host's bundled Fixer source is a historical snapshot
-and is not selected by this build. No installed copy on PATH is used.
+## Two kinds of member
 
-The application still starts in native fx mode. Sign in and select a
-provider through fx's native commands, then use `/fixer` to begin. User
-settings, Team revisions, and sessions retain their existing `~/.fx/`
-locations; this repository separation does not migrate runtime state.
+| Kind | Memory |
+| --- | --- |
+| `peer` | Keeps one session with the primary. Each later call continues that session through the CLI's own resume. The session lasts while the Fixer server runs, which is normally the host session. |
+| `specialist` | Starts fresh on every call. |
 
-## Teams and conversations
+The tool description tells the primary which kind each member is, so it
+knows what to send. Members do not consult each other.
 
-`/fixer` resumes the latest Fixer conversation or opens the Team library
-when none exists. `/fixer teams` opens the library, `/fixer new` opens the
-guided builder, and `/fixer off` returns to native fx.
+## Support
 
-The builder configures the Team name, provider, primary, peers, specialists,
-per-role models and instructions, and specialist authority. Models come
-from fx's live catalog. Teams contain a primary and at least one peer or
-callable specialist, and each role uses a distinct catalog model.
+A CLI can be the **host** (where the primary runs) or a **member runner**
+(where Fixer runs a member). Results below come from real runs on
+2026-10-04.
 
-Team revisions are immutable. Editing creates the next revision and starts
-a new conversation. Existing conversations retain their exact Team revision,
-including after a Team is removed from the library.
+| CLI | As host | Specialist | Peer | Read-only blocks edits | Read-only blocks shell |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code (`claude`) | tested | tested | tested | yes | yes |
+| Codex (`codex`) | tested | tested | tested | yes | yes |
+| OpenCode (`opencode`) | tested | tested | tested | yes | **no** |
+| fx (`fx`) | tested | tested | tested | yes | yes |
+| Cline (`cline`) | not tested | tested | **not possible** | yes | **no** |
+| Cursor (`cursor-agent`) | not tested | not tested | not tested | — | — |
 
-Each user turn starts with the configured primary. One peer holds leadership
-and may answer, hand leadership to another peer, or coordinate work:
+- Cline cannot resume a session without a terminal, so it runs
+  specialists only.
+- On OpenCode and Cline, a read-only member can still run shell commands.
+  Give those members work where that is acceptable.
+- Cursor support follows its help text. It has not run with a real model.
 
-- Consultations return to their immediate caller and do not transfer leadership.
-- Consultants can consult other peers and call their assigned specialists.
-- Specialists receive bounded projections and selected attachments, with
-  fx's tools and permission enforcement.
-- Specialist dependencies, consultation depth, and ancestry checks bound work.
-- Tool activity and operational notices stream through fx. Fixer validates
-  terminal machine envelopes and explicitly publishes the human answer.
+## Start
 
-Native fx subagents and native Codex/Grok modes remain unavailable inside
-Fixer mode. `/fixer off` restores the native environment.
+You need Python 3.11 or later on macOS or Linux, and each member's CLI,
+installed and signed in.
 
-## Verify
+1. Copy `team.example.toml` to `.fixer/team.toml` in your project. Edit it.
+   Then check it:
 
-Bun and tmux are required for deterministic TUI tests; no real model
-credentials are needed.
+   ```sh
+   python3 /path/to/fixer.py check
+   ```
 
-```sh
-python3 scripts/check-layout.py
-zig fmt --check *.zig domain/
-zig build test -Doptimize=ReleaseSafe
-zig build test-e2e -Doptimize=ReleaseSafe
+2. Register Fixer in your host. Run the host from the project directory,
+   because Fixer finds `.fixer/team.toml` there and members work there.
+
+   | Host | Command or file |
+   | --- | --- |
+   | Claude Code | `claude mcp add fixer -- python3 /path/to/fixer.py serve` |
+   | Codex | `codex mcp add fixer -- python3 /path/to/fixer.py serve` |
+   | OpenCode | `opencode.json`: `{"mcp": {"fixer": {"type": "local", "command": ["python3", "/path/to/fixer.py", "serve"]}}}` |
+   | fx | `.mcp.json`: `{"mcpServers": {"fixer": {"command": "python3", "args": ["/path/to/fixer.py", "serve"], "operation_timeout_ms": 900000}}}`, then `fx mcp trust approve fixer` |
+
+3. Allow enough time. A member call can take minutes.
+   - Claude Code: set `MCP_TOOL_TIMEOUT=900000` (milliseconds).
+   - Codex: in `~/.codex/config.toml`, under `[mcp_servers.fixer]`, set
+     `tool_timeout_sec = 900`.
+   - fx: `operation_timeout_ms` in `.mcp.json`, as above.
+
+4. Approve Fixer's tools if your host asks. A headless host (for example
+   `claude -p`) cannot ask; allow the tools in advance, for example
+   `claude -p --allowedTools mcp__fixer`.
+
+Then work as usual. The primary calls members when it decides to, when
+you ask it to, or when a rule in your instructions file tells it to.
+
+## Team file
+
+```toml
+name = "engineering"
+max_active = 4          # member runs at the same time
+timeout_seconds = 900   # for one call
+
+[members.reviewer]
+kind = "peer"
+runner = "codex"
+model = "gpt-5.5"
+description = "Independent reviewer. Pass the diff or name the files."
+instructions = "Find correctness bugs. Cite file:line."
+read_only = true        # the default
 ```
 
-`zig build crucible-host -Doptimize=ReleaseSafe` combines the focused unit
-and TUI checks. `zig build test-host -Doptimize=ReleaseSafe` runs the full
-host unit suite with this extension and is normally left to Full CI.
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `kind` | yes | `peer` or `specialist`. |
+| `runner` | yes | `claude`, `codex`, `opencode`, `fx`, `cursor`, `cline`, or a name from `[commands]`. |
+| `model` | yes | Passed to the runner's model flag. |
+| `description` | yes | Shown to the primary. Say when to call this member. |
+| `instructions` | no | The member's role, sent on the first call. |
+| `read_only` | no | `true` by default. `false` uses the runner's write mode. |
+| `timeout_seconds` | no | Overrides the Team value. |
 
-Full CI checks the assembled product on Linux x86_64 and aarch64 and macOS
-x86_64 and aarch64. It preserves the host's four deterministic E2E shards
-per platform, replaces the historical Fixer scenarios with this repository's
-scenarios, and excludes credentialed live tests.
+The tool name is the member id. Ids use lowercase letters, digits, `-`
+and `_`. Fixer rejects unknown keys, so a typo fails at `fixer check`.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dependency updates and the
-verification requirements. [PROVENANCE.md](PROVENANCE.md) records the
-extraction baseline. Licensed under [Apache-2.0](LICENSE).
+`[commands]` adds another CLI for read-only specialists:
+
+```toml
+[commands]
+my-cli = ["my-cli", "--model", "{model}", "--quiet"]
+```
+
+`{model}` is replaced. The prompt goes to stdin unless an argument contains
+`{prompt}`. The command must print only the answer.
+
+## Safety and limits
+
+- `max_active` counts live member runs for each Team, across processes.
+- Each call has a time limit. When the host cancels a call or exits, Fixer
+  stops the member's whole process group.
+- Each member runs in the server's directory. Fixer sets both the working
+  directory and `PWD`: OpenCode follows `PWD`.
+- Fixer sets `FIXER_MEMBER` in each member's environment. If a member's CLI
+  loads Fixer from your settings, that Fixer offers no tools.
+- A prompt longer than 96 KiB goes to a temporary file that the member reads.
+- A member can read your workspace, the Team file included.
+- A member's answer is a claim. The primary is told to check it, but the
+  primary decides.
+- `FIXER_LOG=/path` records each call as one JSON line: member, runner,
+  model, resumed or not, seconds, exit status.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+The unit tests check each adapter's command lines, parse real CLI output
+saved in `tests/fixtures/`, and check the server with a stand-in CLI.
+
+`tests/test_live.py` runs real CLIs on real models. For each runner it
+checks a one-time call, a peer session against a specialist, and
+read-only against write mode:
+
+```sh
+FIXER_LIVE=claude,codex FIXER_LIVE_CLAUDE=claude-haiku-4-5-20251001 FIXER_LIVE_CODEX=gpt-6-luna \
+  python3 -m unittest tests.test_live -v
+```
+
+## History
+
+Fixer started as a Zig extension compiled into a fork of fx. That version
+is on the `main` branch. [docs/ANALYSIS.md](docs/ANALYSIS.md) records why
+it changed and what was tested.
+
+Licensed under [Apache-2.0](LICENSE).
