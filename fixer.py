@@ -118,7 +118,8 @@ def load_team(path: Path) -> Team:
     try:
         raw = tomllib.loads(path.read_text())
     except FileNotFoundError:
-        raise TeamError(f"no Team file at {path}") from None
+        raise TeamError(f"no Team file at {path}. Fixer reads --team, then $FIXER_TEAM, "
+                        "then .fixer/team.toml or fixer.toml in the working directory") from None
     except tomllib.TOMLDecodeError as err:
         raise TeamError(f"{path}: {err}") from None
 

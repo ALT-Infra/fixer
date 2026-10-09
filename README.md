@@ -70,16 +70,20 @@ You need:
 
 Do these steps:
 
-1. Copy `team.example.toml` to `.fixer/team.toml` in your project.
-2. Edit `.fixer/team.toml`. The section [Team file](#team-file) gives the
-   keys.
+1. Copy `team.example.toml` to `.fixer/team.toml` in your project. For
+   one Team in all of your projects, put the file in a different place,
+   for example `~/.config/fixer/team.toml`, and set `FIXER_TEAM` to its
+   path.
+2. Edit the Team file. The section [Team file](#team-file) gives the keys.
 3. Check the file:
 
    ```sh
    python3 /path/to/fixer.py check
    ```
 
-4. Add Fixer to your host:
+4. Add Fixer to your host. If you use `FIXER_TEAM`, give it to the server:
+   add `-e FIXER_TEAM=/path/to/team.toml` to the Claude Code command, or
+   `--env FIXER_TEAM=/path/to/team.toml` to the Codex command.
 
    | Host | Command or file |
    | --- | --- |
@@ -88,8 +92,9 @@ Do these steps:
    | OpenCode | `opencode.json`: `{"mcp": {"fixer": {"type": "local", "command": ["python3", "/path/to/fixer.py", "serve"]}}}` |
    | fx | `.mcp.json`: `{"mcpServers": {"fixer": {"command": "python3", "args": ["/path/to/fixer.py", "serve"], "operation_timeout_ms": 900000}}}`. Then run `fx mcp trust approve fixer`. |
 
-5. Start the host in the project directory. Fixer reads
-   `.fixer/team.toml` there, and the members work there.
+5. Start the host in the project directory. The members work there.
+   Fixer reads the Team file from `--team`, then from `FIXER_TEAM`, then
+   from `.fixer/team.toml` or `fixer.toml` in that directory.
 6. Increase the time limit of the host for MCP tools. One member call can
    take some minutes.
    - Claude Code: set `MCP_TOOL_TIMEOUT=900000` (milliseconds).

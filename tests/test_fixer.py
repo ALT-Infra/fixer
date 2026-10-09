@@ -411,7 +411,16 @@ class CommandLineTests(unittest.TestCase):
         bad = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check", "--team", "/nonexistent/team.toml"],
                              capture_output=True, text=True)
         self.assertEqual(bad.returncode, 2)
-        self.assertIn("no Team file", bad.stderr)
+        self.assertIn("no Team file at /nonexistent/team.toml. Fixer reads --team, then $FIXER_TEAM", bad.stderr)
+        with tempfile.TemporaryDirectory() as empty:
+            chosen = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check"], capture_output=True, text=True,
+                                    cwd=empty, env={**os.environ, "FIXER_TEAM": str(ROOT / "team.example.toml")})
+            self.assertEqual(chosen.returncode, 0, chosen.stderr)
+            self.assertIn(f"({ROOT / 'team.example.toml'})", chosen.stdout)
+            unset = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check"], capture_output=True, text=True,
+                                   cwd=empty, env={k: v for k, v in os.environ.items() if k != "FIXER_TEAM"})
+            self.assertEqual(unset.returncode, 2)
+            self.assertIn("no Team file at .fixer/team.toml", unset.stderr)
 
 
 if __name__ == "__main__":
