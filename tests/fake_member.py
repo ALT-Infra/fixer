@@ -9,6 +9,7 @@ report what it remembers. Directives in the task text:
   SLEEP <seconds>   wait before answering
   FAIL              exit with status 3
   SILENT            exit 0 with an empty answer
+  NOSESSION         answer without a session id
 """
 import json
 import os
@@ -44,4 +45,4 @@ answer = "" if words[:1] == ["SILENT"] else (
     f"model={model} writes={'--writes' in args} remembered={'|'.join(remembered)} "
     f"member={os.environ.get('FIXER_MEMBER')} cwd={os.getcwd()} pwd={os.environ.get('PWD')}\n"
     f"PROMPT<<{prompt}>>")
-print(json.dumps({"answer": answer, "session": session}))
+print(json.dumps({"answer": answer, "session": None if words[:1] == ["NOSESSION"] else session}))

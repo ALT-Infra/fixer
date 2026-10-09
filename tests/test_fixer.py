@@ -27,6 +27,12 @@ import fixer  # noqa: E402
 class FakeAdapter(fixer.Adapter):
     name = "fake"
     sessions = True
+    takes_effort = True
+
+    def check_effort(self, model, effort, env, deadline):
+        if effort == "slow":
+            time.sleep(1.5)
+        return f"the fake CLI refuses effort '{effort}'" if effort == "bad" else None
 
     def invoke(self, call):
         argv = [sys.executable, FAKE, call.member.model]
@@ -69,8 +75,9 @@ def write_team(directory: Path, body: str) -> Path:
     return path
 
 
-def call(member, model="m", read_only=True, kind="specialist"):
-    return fixer.Member(id=member, kind=kind, runner="x", model=model, description="d", read_only=read_only)
+def call(member, model="m", read_only=True, kind="specialist", effort=""):
+    return fixer.Member(id=member, kind=kind, runner="x", model=model, description="d", read_only=read_only,
+                        effort=effort)
 
 
 class TeamFileTests(unittest.TestCase):
@@ -121,6 +128,64 @@ class TeamFileTests(unittest.TestCase):
         self.rejected('[members.Bad]\nkind = "specialist"\nrunner = "fake"\nmodel = "m"\ndescription = "d"\n', "lowercase")
         self.load('[members.engineering_checkup]\nkind = "specialist"\nrunner = "fake"\nmodel = "m"\ndescription = "d"\n')
 
+    def test_effort_is_checked_by_the_cli_or_passed_to_it(self):
+        member = '[members.m]\nkind = "specialist"\nrunner = "{runner}"\nmodel = "m"\ndescription = "d"\neffort = "{effort}"\n'
+        # Codex and Cline refuse an unknown effort themselves, when the member runs.
+        self.assertEqual(self.load(member.format(runner="codex", effort="ultra")).members["m"].effort, "ultra")
+        self.assertEqual(self.load(member.format(runner="cline", effort="ultra")).members["m"].effort, "ultra")
+        self.rejected(member.format(runner="fx", effort="high"), "runner 'fx' has no effort setting")
+        self.rejected(member.format(runner="codex", effort=" "), "'effort' must be a non-empty string")
+        self.rejected('[commands]\nmine = ["my-cli"]\n' + member.format(runner="mine", effort="high"),
+                      "runner 'mine' has no effort setting")
+        self.assertEqual(self.load(TEAM).members["scout"].effort, "")
+
+    def stand_in(self, name, body):
+        """A stand-in CLI on an otherwise empty PATH, for this test."""
+        bin_dir = Path(tempfile.mkdtemp())
+        (bin_dir / name).write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
+        (bin_dir / name).chmod(0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = str(bin_dir)
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        return bin_dir / name
+
+    def test_claude_is_asked_about_the_effort(self):
+        # Like `claude --version`, it warns about an effort it does not know.
+        claude = self.stand_in("claude", """\
+            import sys
+            args = sys.argv[1:]
+            value = args[args.index("--effort") + 1] if "--effort" in args else None
+            if value == "broken":
+                sys.exit(2)
+            if value not in (None, "low", "max"):
+                print(f"Warning: Unknown --effort value '{value}'", file=sys.stderr)
+            print("9.9.9 (Claude Code)", file=sys.stderr)
+            """)
+        member = '[members.m]\nkind = "specialist"\nrunner = "claude"\nmodel = "m"\ndescription = "d"\neffort = "{}"\n'
+        self.assertEqual(self.load(member.format("max")).members["m"].effort, "max")
+        self.rejected(member.format("xhgh"), "claude refuses effort 'xhgh': Warning: Unknown --effort value 'xhgh'")
+        self.rejected(member.format("broken"), "Fixer cannot check the effort: 'claude --effort broken --version' "
+                                               "failed with exit status 2")
+        claude.write_text(f"#!{sys.executable}\nprint('9.9.9 (Claude Code)')\n")  # warns about nothing
+        self.rejected(member.format("max"), "claude no longer warns about an unknown --effort value")
+        claude.unlink()
+        self.rejected(member.format("max"), "Fixer cannot check the effort: claude is not installed")
+
+    def test_opencode_effort_is_a_variant_of_the_model(self):
+        variants = fixer.OpenCodeAdapter.variants
+        listing = (FIXTURES / "opencode-models.txt").read_text()  # real `opencode models --verbose` output
+        self.assertEqual(variants(listing, "opencode/step-5-preview-free"), ["low", "medium", "high"])
+        self.assertEqual(variants(listing, "opencode/nemotron-3.5-lightning-free"), [])
+        self.assertIsNone(variants(listing, "opencode/step-5"))
+        with self.assertRaises(ValueError):  # another shape is not "no variants"
+            variants(listing.replace('"variants"', '"modes"'), "opencode/step-5-preview-free")
+        self.stand_in("opencode", f"print({listing.replace(chr(34) + 'variants' + chr(34), chr(34) + 'modes' + chr(34))!r})\n")
+        member = ('[members.m]\nkind = "specialist"\nrunner = "opencode"\nmodel = "opencode/step-5-preview-free"\n'
+                  'description = "d"\neffort = "high"\n')
+        self.rejected(member, "Fixer cannot check the effort: it cannot read 'opencode models --verbose'")
+        os.environ["PATH"] = tempfile.mkdtemp()  # no opencode on it
+        self.rejected(member, "Fixer cannot check the effort: opencode is not installed")
+
     def test_example_team_is_valid(self):
         team = fixer.load_team(ROOT / "team.example.toml")
         self.assertEqual({m.kind for m in team.members.values()}, {"peer", "specialist"})
@@ -143,6 +208,12 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("acceptEdits", first.argv)
         later, c = self.invoke("claude", call("p"), session="u-1", resume=True, keep=True)
         self.assertEqual(later.argv[later.argv.index("--resume") + 1], "u-1")
+        self.assertNotIn("--effort", one.argv + later.argv)
+        self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", one.env)
+        for session, resume in ((None, False), ("u-1", True)):
+            pinned, _ = self.invoke("claude", call("p", effort="xhigh"), session=session, resume=resume, keep=resume)
+            self.assertEqual(pinned.argv[pinned.argv.index("--effort") + 1], "xhigh")
+            self.assertEqual(pinned.env["CLAUDE_CODE_EFFORT_LEVEL"], "xhigh")
         self.assertEqual(adapter.parse((FIXTURES / "claude.json").read_text(), c),
                          ("PONG", "11111111-2222-4333-8444-555555555555"))
         with self.assertRaises(fixer.MemberError):
@@ -159,6 +230,11 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(later.argv[-2:], ["t-1", "-"])
         self.assertIn('sandbox_mode="workspace-write"', later.argv)
         self.assertNotIn("--ephemeral", later.argv)
+        self.assertFalse(any("model_reasoning_effort" in part for part in one.argv + later.argv))
+        for session, resume in ((None, False), ("t-1", True)):
+            pinned, _ = self.invoke("codex", call("p", effort="xhigh"), session=session, resume=resume, keep=resume)
+            self.assertIn('model_reasoning_effort="xhigh"', pinned.argv)
+            self.assertEqual(pinned.argv[pinned.argv.index('model_reasoning_effort="xhigh"') - 1], "-c")
         answer, thread = fixer.ADAPTERS["codex"].parse((FIXTURES / "codex.jsonl").read_text(), c)
         self.assertEqual((answer, thread), ("PONG", "01a1087e-6692-7d61-8d78-a9569f645292"))
 
@@ -169,6 +245,10 @@ class AdapterTests(unittest.TestCase):
         later, _ = self.invoke("opencode", call("p", read_only=False), session="ses_1", resume=True, keep=True)
         self.assertEqual(later.argv[later.argv.index("--session") + 1], "ses_1")
         self.assertNotIn("--agent", later.argv)
+        self.assertNotIn("--variant", one.argv + later.argv)
+        pinned, _ = self.invoke("opencode", call("p", effort="high"), session="ses_1", resume=True, keep=True)
+        self.assertEqual(pinned.argv[pinned.argv.index("--variant") + 1], "high")
+        self.assertEqual(pinned.argv[-1], "PROMPT")
         answer, session = fixer.ADAPTERS["opencode"].parse((FIXTURES / "opencode.jsonl").read_text(), c)
         self.assertEqual(answer, "ZEBRA-41")
         self.assertTrue(session.startswith("ses_"))
@@ -178,6 +258,10 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--plan", one.argv)
         write, _ = self.invoke("cline", call("w", read_only=False))
         self.assertEqual(write.argv[write.argv.index("--auto-approve") + 1], "true")
+        self.assertNotIn("--thinking", one.argv + write.argv)
+        pinned, _ = self.invoke("cline", call("s", effort="xhigh"))
+        self.assertEqual(pinned.argv[pinned.argv.index("--thinking") + 1], "xhigh")
+        self.assertEqual(pinned.argv[-1], "PROMPT")
         self.assertEqual(fixer.ADAPTERS["cline"].parse((FIXTURES / "cline.jsonl").read_text(), c), ("OK", None))
         with self.assertRaises(fixer.MemberError):
             fixer.ADAPTERS["cline"].parse('{"type":"error","message":"Free model promotion ended"}', c)
@@ -190,13 +274,37 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--auto", later.argv)
         self.assertEqual(fixer.ADAPTERS["fx"].parse((FIXTURES / "fx.json").read_text(), c), ("OK", "ncWnEvfmiGsE"))
 
-    def test_cursor_command_lines(self):
-        # No real Cursor output: Cursor is not tested with a real model.
-        one, _ = self.invoke("cursor", call("s"))
+    def test_output_without_proof_of_success_fails(self):
+        # Real outputs with the CLI's sign of success taken out: a partial answer must not pass.
+        c = fixer.Call(call("s"), "PROMPT", None, False, False, 60)
+        lines = lambda name, drop: "\n".join(l for l in (FIXTURES / name).read_text().splitlines() if drop not in l)
+
+        def result(name, change):
+            value = json.loads((FIXTURES / name).read_text())
+            change(value)
+            return json.dumps(value)
+
+        cases = {
+            "claude": result("claude.json", lambda r: r.update(subtype="other")),
+            "cursor": result("cursor.json", lambda r: r.pop("is_error")),
+            "codex": lines("codex.jsonl", '"turn.completed"'),
+            "opencode": lines("opencode.jsonl", '"step_finish"'),
+            "opencode, cut short": (FIXTURES / "opencode.jsonl").read_text().replace('"reason":"stop"', '"reason":"length"'),
+            "fx": result("fx.json", lambda r: r.pop("exit_code")),
+        }
+        self.assertIn('"reason":"stop"', (FIXTURES / "opencode.jsonl").read_text())
+        for name, output in cases.items():
+            with self.subTest(name), self.assertRaises(fixer.MemberError):
+                fixer.ADAPTERS[name.split(",")[0]].parse(output, c)
+
+    def test_cursor(self):
+        one, c = self.invoke("cursor", call("s"))
         self.assertEqual(one.argv[one.argv.index("--mode") + 1], "ask")
         later, _ = self.invoke("cursor", call("p", read_only=False), session="chat-1", resume=True, keep=True)
         self.assertEqual(later.argv[later.argv.index("--resume") + 1], "chat-1")
         self.assertIn("--force", later.argv)
+        self.assertEqual(fixer.ADAPTERS["cursor"].parse((FIXTURES / "cursor.json").read_text(), c),
+                         ("PONG", "af4c9f09-bffa-4fc1-9dd7-bc8eb578e976"))
 
 
 class Harness:
@@ -290,6 +398,50 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Starts fresh on every call", tools["scout"]["description"])
         self.assertIn("read-only", tools["scout"]["description"])
 
+    def serve(self, body):
+        self.harness = Harness(fixer.load_team(write_team(self.dir, body), check_efforts=False))
+        return self.harness
+
+    def test_a_running_server_checks_an_effort_at_each_call(self):
+        body = TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "bad"')
+        with self.assertRaises(fixer.TeamError):  # `fixer check` asks at once
+            fixer.load_team(write_team(self.dir, body))
+        h = self.serve(body)
+        for _ in range(2):  # no answer is kept: the CLI can change while the server runs
+            self.assertEqual(h.text("reviewer", task="Look."), ("fixer: reviewer: the fake CLI refuses effort 'bad'", True))
+        text, is_error = h.text("scout", task="Look.")  # the other members still work
+        self.assertFalse(is_error, text)
+
+    def test_the_effort_check_counts_in_the_calls_time_limit(self):
+        h = self.serve(TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "slow"\ntimeout_seconds = 1'))
+        text, is_error = h.text("reviewer", task="Look.")
+        self.assertTrue(is_error)
+        self.assertIn("did not finish within 1s", text)
+
+    def test_the_effort_check_waits_for_a_free_slot(self):
+        h = self.serve("max_active = 1\n" + TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "bad"'))
+        busy = h.send("tools/call", {"name": "scout", "arguments": {"task": "SLEEP 2"}})
+        time.sleep(0.5)
+        text, is_error = h.text("reviewer", task="Look.")
+        self.assertTrue(is_error)
+        self.assertIn("members are already running", text)  # not the effort: it has no slot yet
+        h.wait(busy)
+
+    def test_effort_shows_in_the_description_the_answer_and_the_log(self):
+        log = self.dir / "calls.log"
+        os.environ["FIXER_LOG"] = str(log)
+        self.addCleanup(os.environ.pop, "FIXER_LOG", None)
+        h = self.start(TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "high"'))
+        tools = {t["name"]: t for t in h.wait(h.send("tools/list"))["result"]["tools"]}
+        self.assertIn("Model model-a, effort high, read-only.", tools["reviewer"]["description"])
+        self.assertIn("Model model-b, read-only.", tools["scout"]["description"])
+        text, is_error = h.text("reviewer", task="Look.")
+        self.assertFalse(is_error, text)
+        self.assertTrue(text.startswith("[reviewer · fake model-a, effort high · "), text)
+        h.text("scout", task="Look.")
+        calls = {entry["member"]: entry for entry in map(json.loads, log.read_text().splitlines())}
+        self.assertEqual((calls["reviewer"]["effort"], calls["scout"]["effort"]), ("high", None))
+
     def test_specialist_call_carries_role_task_context_and_workspace(self):
         h = self.start()
         text, is_error = h.text("scout", task="Find the parser.", context="It reads TOML.")
@@ -336,6 +488,14 @@ class ServerTests(unittest.TestCase):
         self.assertIn("no answer", text)
         self.assertTrue(h.text("ghost", task="x")[1])
         self.assertTrue(h.text("scout", task="  ")[1])
+
+    def test_a_peer_without_a_session_id_fails_instead_of_forgetting(self):
+        h = self.start()
+        text, is_error = h.text("reviewer", task="NOSESSION Look.")
+        self.assertTrue(is_error)
+        self.assertIn("the CLI gave no session id, so this peer would not remember the call", text)
+        text, is_error = h.text("scout", task="NOSESSION Look.")  # a specialist keeps no session anyway
+        self.assertFalse(is_error, text)
 
     def test_a_failed_first_call_does_not_keep_a_session(self):
         h = self.start()
@@ -402,6 +562,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(h.wait(h.send("ping"))["result"], {})
 
 
+class StopTests(unittest.TestCase):
+    def test_stopping_a_member_stops_its_whole_process_group(self):
+        marker = Path(tempfile.mkdtemp()) / "still-running"
+        # The CLI exits on SIGTERM; its child ignores SIGTERM and would write a file a second later.
+        child = ("import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                 "print('ready', flush=True); time.sleep(1); open(sys.argv[1], 'w').write('x')")
+        cli = (f"import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[1]], "
+               "stdout=subprocess.PIPE, text=True); c.stdout.readline(); print('ready', flush=True); time.sleep(60)")
+        process = subprocess.Popen([sys.executable, "-c", cli, str(marker)], stdout=subprocess.PIPE, text=True,
+                                   start_new_session=True)
+        self.assertEqual(process.stdout.readline().strip(), "ready")
+        fixer._kill(process, grace=0.3)
+        time.sleep(1.5)
+        self.assertFalse(marker.exists(), "a child of the member outlived the stop")
+
+
 class CommandLineTests(unittest.TestCase):
     def test_check(self):
         good = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check", "--team", str(ROOT / "team.example.toml")],
@@ -411,7 +587,16 @@ class CommandLineTests(unittest.TestCase):
         bad = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check", "--team", "/nonexistent/team.toml"],
                              capture_output=True, text=True)
         self.assertEqual(bad.returncode, 2)
-        self.assertIn("no Team file", bad.stderr)
+        self.assertIn("no Team file at /nonexistent/team.toml. Fixer reads --team, then $FIXER_TEAM", bad.stderr)
+        with tempfile.TemporaryDirectory() as empty:
+            chosen = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check"], capture_output=True, text=True,
+                                    cwd=empty, env={**os.environ, "FIXER_TEAM": str(ROOT / "team.example.toml")})
+            self.assertEqual(chosen.returncode, 0, chosen.stderr)
+            self.assertIn(f"({ROOT / 'team.example.toml'})", chosen.stdout)
+            unset = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check"], capture_output=True, text=True,
+                                   cwd=empty, env={k: v for k, v in os.environ.items() if k != "FIXER_TEAM"})
+            self.assertEqual(unset.returncode, 2)
+            self.assertIn("no Team file at .fixer/team.toml", unset.stderr)
 
 
 if __name__ == "__main__":
