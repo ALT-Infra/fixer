@@ -899,6 +899,9 @@ class Server:
             failure = f"exit status {process.returncode}" + (f" ({failure})" if failure else "")
         if failure is None and not answer.strip():
             failure = "no answer"
+        if failure is None and keep and not new_session:
+            # The next call would start fresh while the tool says this peer remembers.
+            failure = "the CLI gave no session id, so this peer would not remember the call"
         log_event(member=member.id, runner=member.runner, model=member.model, effort=member.effort or None,
                   resumed=resume, seconds=round(elapsed, 1), exit_status=process.returncode,
                   ok=failure is None)

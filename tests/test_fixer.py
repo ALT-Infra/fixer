@@ -466,6 +466,14 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(h.text("ghost", task="x")[1])
         self.assertTrue(h.text("scout", task="  ")[1])
 
+    def test_a_peer_without_a_session_id_fails_instead_of_forgetting(self):
+        h = self.start()
+        text, is_error = h.text("reviewer", task="NOSESSION Look.")
+        self.assertTrue(is_error)
+        self.assertIn("the CLI gave no session id, so this peer would not remember the call", text)
+        text, is_error = h.text("scout", task="NOSESSION Look.")  # a specialist keeps no session anyway
+        self.assertFalse(is_error, text)
+
     def test_a_failed_first_call_does_not_keep_a_session(self):
         h = self.start()
         self.assertTrue(h.text("reviewer", task="FAIL")[1])
