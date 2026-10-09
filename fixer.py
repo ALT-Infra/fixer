@@ -658,18 +658,27 @@ def log_event(**fields) -> None:
             handle.write(json.dumps({"time": round(time.time(), 3), "pid": os.getpid(), **fields}) + "\n")
 
 
-def _kill(process: subprocess.Popen) -> None:
+def _kill(process: subprocess.Popen, grace: float = 3) -> None:
+    """Stop a member's whole process group: SIGTERM, then SIGKILL for whatever
+    is left after `grace` seconds, the CLI or a child that ignored SIGTERM."""
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        process.poll()  # reap the CLI, so only live members of the group answer
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, 0)
         except ProcessLookupError:
-            pass
+            return
+        except PermissionError:
+            pass  # macOS answers this while a member of the group is still exiting
+        time.sleep(0.05)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 # -- MCP server ------------------------------------------------------------

@@ -562,6 +562,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(h.wait(h.send("ping"))["result"], {})
 
 
+class StopTests(unittest.TestCase):
+    def test_stopping_a_member_stops_its_whole_process_group(self):
+        marker = Path(tempfile.mkdtemp()) / "still-running"
+        # The CLI exits on SIGTERM; its child ignores SIGTERM and would write a file a second later.
+        child = ("import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                 "print('ready', flush=True); time.sleep(1); open(sys.argv[1], 'w').write('x')")
+        cli = (f"import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[1]], "
+               "stdout=subprocess.PIPE, text=True); c.stdout.readline(); print('ready', flush=True); time.sleep(60)")
+        process = subprocess.Popen([sys.executable, "-c", cli, str(marker)], stdout=subprocess.PIPE, text=True,
+                                   start_new_session=True)
+        self.assertEqual(process.stdout.readline().strip(), "ready")
+        fixer._kill(process, grace=0.3)
+        time.sleep(1.5)
+        self.assertFalse(marker.exists(), "a child of the member outlived the stop")
+
+
 class CommandLineTests(unittest.TestCase):
     def test_check(self):
         good = subprocess.run([sys.executable, str(ROOT / "fixer.py"), "check", "--team", str(ROOT / "team.example.toml")],
