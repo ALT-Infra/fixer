@@ -338,6 +338,8 @@ class ClaudeAdapter(Adapter):
         result = _json_object(stdout)
         if result.get("is_error"):
             raise MemberError(str(result.get("result") or result.get("subtype") or "error"))
+        if result.get("is_error") is not False or result.get("subtype") != "success":
+            raise MemberError("the result does not say that the call succeeded")
         return str(result.get("result") or ""), result.get("session_id")
 
     def check_effort(self, model, effort, env, deadline):
@@ -379,16 +381,20 @@ class CodexAdapter(Adapter):
         return Invocation(argv, stdin=call.prompt)
 
     def parse(self, stdout, call):
-        thread, answer = None, None
+        thread, answer, completed = None, None, False
         for event in _json_lines(stdout):
             kind = event.get("type")
             if kind == "thread.started":
                 thread = event.get("thread_id")
+            elif kind == "turn.completed":
+                completed = True
             elif kind == "item.completed" and (event.get("item") or {}).get("type") == "agent_message":
                 answer = event["item"].get("text")
             elif kind in ("turn.failed", "error"):
                 detail = (event.get("error") or {}).get("message") or event.get("message")
                 raise MemberError(str(detail or event))
+        if not completed:
+            raise MemberError("codex did not report that the turn completed")
         return answer or "", thread or call.session
 
 
@@ -418,17 +424,21 @@ class OpenCodeAdapter(Adapter):
         return Invocation(argv + [call.prompt])
 
     def parse(self, stdout, call):
-        session, texts = None, []
+        session, texts, reason = None, [], None
         for event in _json_lines(stdout):
             session = event.get("sessionID") or session
             kind = event.get("type")
             if kind == "step_start":
-                texts = []  # keep only the last step's text: the final answer
+                texts, reason = [], None  # keep only the last step's text: the final answer
+            elif kind == "step_finish":
+                reason = (event.get("part") or {}).get("reason")
             elif kind == "text":
                 texts.append((event.get("part") or {}).get("text", ""))
             elif kind == "error":
                 error = event.get("error") or {}
                 raise MemberError(str((error.get("data") or {}).get("message") or error))
+        if reason != "stop":  # "length", "content-filter", ...: the answer stopped short
+            raise MemberError(f"opencode's last step ended with {reason or 'no finish'}, not stop")
         return "".join(texts), session
 
     def check_effort(self, model, effort, env, deadline):
@@ -490,6 +500,8 @@ class CursorAdapter(Adapter):
         result = _json_object(stdout)
         if result.get("is_error"):
             raise MemberError(str(result.get("result") or "error"))
+        if result.get("is_error") is not False or result.get("subtype") != "success":
+            raise MemberError("the result does not say that the call succeeded")
         return str(result.get("result") or ""), result.get("session_id") or call.session
 
 
@@ -539,7 +551,9 @@ class FxAdapter(Adapter):
 
     def parse(self, stdout, call):
         result = _json_object(stdout)
-        if result.get("exit_code", 0) != 0:
+        if "exit_code" not in result:
+            raise MemberError("fx printed no exit code")
+        if result["exit_code"] != 0:
             raise MemberError(str(result.get("final_output") or result.get("error") or result))
         return str(result.get("final_output") or result.get("output") or ""), result.get("session_id")
 

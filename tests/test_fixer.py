@@ -274,6 +274,29 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--auto", later.argv)
         self.assertEqual(fixer.ADAPTERS["fx"].parse((FIXTURES / "fx.json").read_text(), c), ("OK", "ncWnEvfmiGsE"))
 
+    def test_output_without_proof_of_success_fails(self):
+        # Real outputs with the CLI's sign of success taken out: a partial answer must not pass.
+        c = fixer.Call(call("s"), "PROMPT", None, False, False, 60)
+        lines = lambda name, drop: "\n".join(l for l in (FIXTURES / name).read_text().splitlines() if drop not in l)
+
+        def result(name, change):
+            value = json.loads((FIXTURES / name).read_text())
+            change(value)
+            return json.dumps(value)
+
+        cases = {
+            "claude": result("claude.json", lambda r: r.update(subtype="other")),
+            "cursor": result("cursor.json", lambda r: r.pop("is_error")),
+            "codex": lines("codex.jsonl", '"turn.completed"'),
+            "opencode": lines("opencode.jsonl", '"step_finish"'),
+            "opencode, cut short": (FIXTURES / "opencode.jsonl").read_text().replace('"reason":"stop"', '"reason":"length"'),
+            "fx": result("fx.json", lambda r: r.pop("exit_code")),
+        }
+        self.assertIn('"reason":"stop"', (FIXTURES / "opencode.jsonl").read_text())
+        for name, output in cases.items():
+            with self.subTest(name), self.assertRaises(fixer.MemberError):
+                fixer.ADAPTERS[name.split(",")[0]].parse(output, c)
+
     def test_cursor(self):
         one, c = self.invoke("cursor", call("s"))
         self.assertEqual(one.argv[one.argv.index("--mode") + 1], "ask")
