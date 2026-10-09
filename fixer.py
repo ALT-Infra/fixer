@@ -16,6 +16,7 @@ Standard library only. Python 3.11+, macOS or Linux.
 from __future__ import annotations
 
 import argparse
+import collections
 import fcntl
 import hashlib
 import json
@@ -64,6 +65,7 @@ class Member:
     instructions: str = ""
     read_only: bool = True
     timeout_seconds: int | None = None
+    effort: str = ""          # empty: the CLI's own default
 
 
 @dataclass
@@ -114,7 +116,10 @@ def _positive_int(table: dict, key: str, default: int | None, where: str) -> int
     return value
 
 
-def load_team(path: Path) -> Team:
+def load_team(path: Path, check_efforts: bool = True) -> Team:
+    """Read and check a Team file. With check_efforts, ask the CLIs that need it
+    whether they accept each member's effort; the server asks at each call
+    instead, so one CLI that cannot answer does not stop the others."""
     try:
         raw = tomllib.loads(path.read_text())
     except FileNotFoundError:
@@ -125,6 +130,10 @@ def load_team(path: Path) -> Team:
 
     _reject_unknown(raw, {"name", "max_active", "timeout_seconds", "env", "commands", "members"},
                     str(path))
+
+    env = raw.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        raise TeamError("env must be a table of strings")
 
     commands: dict[str, tuple[str, ...]] = {}
     for name, argv in raw.get("commands", {}).items():
@@ -146,7 +155,7 @@ def load_team(path: Path) -> Team:
         if not isinstance(spec, dict):
             raise TeamError(f"{where} must be a table")
         _reject_unknown(spec, {"kind", "runner", "model", "description", "instructions",
-                               "read_only", "timeout_seconds"}, where)
+                               "read_only", "timeout_seconds", "effort"}, where)
         kind = _text(spec, "kind", where)
         if kind not in KINDS:
             raise TeamError(f"{where}: 'kind' must be 'peer' or 'specialist'")
@@ -157,6 +166,15 @@ def load_team(path: Path) -> Team:
         read_only = spec.get("read_only", True)
         if not isinstance(read_only, bool):
             raise TeamError(f"{where}: 'read_only' must be true or false")
+        adapter = CommandAdapter(commands[runner]) if runner in commands else ADAPTERS[runner]
+        effort = _text(spec, "effort", where, required="effort" in spec)
+        if effort and not adapter.takes_effort:
+            raise TeamError(f"{where}: runner '{runner}' has no effort setting in Fixer")
+        if effort and check_efforts:
+            problem = adapter.check_effort(_text(spec, "model", where), effort,
+                                           {**os.environ, **env, "PWD": os.getcwd()}, time.monotonic() + 120)
+            if problem:
+                raise TeamError(f"{where}: {problem}")
         member = Member(
             id=member_id, kind=kind, runner=runner,
             model=_text(spec, "model", where),
@@ -164,18 +182,14 @@ def load_team(path: Path) -> Team:
             instructions=_text(spec, "instructions", where, required=False),
             read_only=read_only,
             timeout_seconds=_positive_int(spec, "timeout_seconds", None, where),
+            effort=effort,
         )
-        adapter = CommandAdapter(commands[runner]) if runner in commands else ADAPTERS[runner]
         if kind == "peer" and not adapter.sessions:
             raise TeamError(f"{where}: runner '{runner}' cannot resume a session headless, "
                             "so it can run specialists only")
         if not read_only and not adapter.can_write:
             raise TeamError(f"{where}: runner '{runner}' has no write mode")
         members[member_id] = member
-
-    env = raw.get("env", {})
-    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
-        raise TeamError("env must be a table of strings")
 
     return Team(
         path=path.resolve(),
@@ -229,6 +243,7 @@ class Adapter:
     sessions = False          # can resume a session with no terminal
     can_write = True
     chooses_session_id = False  # Fixer picks the id (True) or reads it from output (False)
+    takes_effort = False      # the CLI has an effort setting that Fixer gives
 
     def invoke(self, call: Call) -> Invocation:
         raise NotImplementedError
@@ -240,6 +255,34 @@ class Adapter:
     def new_session(self, member: Member, env: dict) -> str | None:
         """Create a session before the first call, for CLIs that need it."""
         return str(uuid.uuid4()) if self.chooses_session_id else None
+
+    def check_effort(self, model: str, effort: str, env: dict, deadline: float) -> str | None:
+        """Why the CLI would not run `model` at `effort`, or None. Fixer keeps no
+        list of values: a CLI that refuses an unknown value itself gets it as
+        given, and the call fails with its message. A CLI that ignores one
+        without an error overrides this to ask the CLI first."""
+        return None
+
+
+def _probe(argv: list[str], env: dict, deadline: float):
+    """Run a CLI to ask it something, by `deadline` (time.monotonic()): (its
+    output, None), or (None, why it could not answer)."""
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env, cwd=env.get("PWD"), start_new_session=True)
+    except FileNotFoundError:
+        return None, f"{argv[0]} is not installed"
+    except OSError as err:
+        return None, f"cannot run {argv[0]}: {err.strerror}"
+    try:
+        stdout, stderr = process.communicate(timeout=max(deadline - time.monotonic(), 0))
+    except subprocess.TimeoutExpired:
+        _kill(process)
+        process.communicate()
+        return None, f"'{' '.join(argv)}' did not finish in time"
+    if process.returncode != 0:
+        return None, f"'{' '.join(argv)}' failed with exit status {process.returncode}: {stderr.strip()[-300:]}"
+    return subprocess.CompletedProcess(argv, 0, stdout, stderr), None
 
 
 def _json_lines(stdout: str) -> list[dict]:
@@ -270,9 +313,15 @@ class ClaudeAdapter(Adapter):
     name = "claude"
     sessions = True
     chooses_session_id = True
+    takes_effort = True
 
     def invoke(self, call):
         argv = ["claude", "-p", "--output-format", "json", "--model", call.member.model]
+        # CLAUDE_CODE_EFFORT_LEVEL outranks --effort, and a member inherits
+        # the server's environment, so Fixer sets both.
+        env = {"CLAUDE_CODE_EFFORT_LEVEL": call.member.effort} if call.member.effort else {}
+        if call.member.effort:
+            argv += ["--effort", call.member.effort]
         if call.resume:
             argv += ["--resume", call.session]
         elif call.keep:
@@ -283,7 +332,7 @@ class ClaudeAdapter(Adapter):
         # need no approval; acceptEdits allows file edits as well.
         if not call.member.read_only:
             argv += ["--permission-mode", "acceptEdits"]
-        return Invocation(argv, stdin=call.prompt)
+        return Invocation(argv, stdin=call.prompt, env=env)
 
     def parse(self, stdout, call):
         result = _json_object(stdout)
@@ -291,16 +340,36 @@ class ClaudeAdapter(Adapter):
             raise MemberError(str(result.get("result") or result.get("subtype") or "error"))
         return str(result.get("result") or ""), result.get("session_id")
 
+    def check_effort(self, model, effort, env, deadline):
+        # Claude Code runs an unknown effort at its default without an error but
+        # warns, even with --version: what --effort adds is its complaint. A
+        # value no CLI accepts must add something, or the check tells nothing.
+        env = {k: v for k, v in env.items() if k != "CLAUDE_CODE_EFFORT_LEVEL"}
+        runs = {}
+        for name, flags in (("plain", ()), ("tried", ("--effort", effort)),
+                            ("control", ("--effort", f"fixer-control-{uuid.uuid4().hex[:8]}"))):
+            done, why = _probe(["claude", *flags, "--version"], env, deadline)
+            if why:
+                return f"Fixer cannot check the effort: {why}"
+            runs[name] = collections.Counter((done.stdout + done.stderr).splitlines())
+        if not runs["control"] - runs["plain"]:
+            return "Fixer cannot check the effort: claude no longer warns about an unknown --effort value"
+        added = list((runs["tried"] - runs["plain"]).elements())
+        return f"claude refuses effort '{effort}': {' '.join(added)}" if added else None
+
 
 class CodexAdapter(Adapter):
     """OpenAI Codex: codex exec. Fixer reads the thread id from --json events."""
     name = "codex"
     sessions = True
+    takes_effort = True  # the API refuses an unknown effort, and the call fails
 
     def invoke(self, call):
         sandbox = "read-only" if call.member.read_only else "workspace-write"
         options = ["--json", "--skip-git-repo-check", "-m", call.member.model,
                    "-c", f'sandbox_mode="{sandbox}"']
+        if call.member.effort:
+            options += ["-c", f'model_reasoning_effort="{call.member.effort}"']
         if not call.keep:
             options += ["--ephemeral"]
         if call.resume:
@@ -329,12 +398,19 @@ class OpenCodeAdapter(Adapter):
     The plan agent denies edits but allows shell commands. A config that also
     denies bash makes OpenCode's free tier refuse the request, so Fixer does
     not send one.
+
+    The effort is a variant of the model, and each model has its own.
+    OpenCode runs an unknown one at the default without an error, so Fixer
+    checks it against the variants that OpenCode lists for the model.
     """
     name = "opencode"
     sessions = True
+    takes_effort = True
 
     def invoke(self, call):
         argv = ["opencode", "run", "--format", "json", "-m", call.member.model]
+        if call.member.effort:
+            argv += ["--variant", call.member.effort]
         if call.resume:
             argv += ["--session", call.session]
         if call.member.read_only:
@@ -354,6 +430,36 @@ class OpenCodeAdapter(Adapter):
                 error = event.get("error") or {}
                 raise MemberError(str((error.get("data") or {}).get("message") or error))
         return "".join(texts), session
+
+    def check_effort(self, model, effort, env, deadline):
+        done, why = _probe(["opencode", "models", "--verbose"], env, deadline)
+        if why:
+            return f"Fixer cannot check the effort: {why}"
+        try:
+            variants = self.variants(done.stdout, model)
+        except ValueError as err:
+            return f"Fixer cannot check the effort: it cannot read 'opencode models --verbose' ({err})"
+        if variants is None:
+            return f"'opencode models' does not list the model '{model}'"
+        if effort not in variants:
+            return f"'effort' for {model} is one of: {', '.join(variants) or 'none, it has no variants'}"
+        return None
+
+    @staticmethod
+    def variants(listing: str, model: str) -> list[str] | None:
+        """The variants `opencode models --verbose` gives for `model`, or None if
+        it does not list the model. Each model is its id on one line, then a
+        JSON object with a "variants" object, empty if it has none."""
+        start = 0
+        while (found := listing.find(model + "\n", start)) >= 0:
+            if found == 0 or listing[found - 1] == "\n":
+                details, _ = json.JSONDecoder().raw_decode(listing, found + len(model) + 1)
+                variants = details.get("variants") if isinstance(details, dict) else None
+                if not isinstance(variants, dict):
+                    raise ValueError(f"no variants object for {model}")
+                return list(variants)
+            start = found + 1
+        return None
 
 
 class CursorAdapter(Adapter):
@@ -398,9 +504,12 @@ class ClineAdapter(Adapter):
     headless run cannot give.
     """
     name = "cline"
+    takes_effort = True  # Cline refuses an unknown effort before it calls a model
 
     def invoke(self, call):
         argv = ["cline", "--json", "-m", call.member.model]
+        if call.member.effort:
+            argv += ["--thinking", call.member.effort]
         # Cline approves every tool by default. Plan mode makes no edits.
         argv += ["--plan"] if call.member.read_only else ["--auto-approve", "true"]
         return Invocation(argv + [call.prompt])
@@ -672,7 +781,7 @@ class Server:
             access = "read-only" if member.read_only else "may edit files"
             tools.append({
                 "name": member_id,
-                "description": f"{member.description}\n{memory} Model {member.model}, {access}.",
+                "description": f"{member.description}\n{memory} Model {_model(member)}, {access}.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -734,6 +843,15 @@ class Server:
         prompt_file = None
         started = time.monotonic()
         try:
+            if member.effort:
+                # Asked at every call, within its slot and time limit: a CLI or its
+                # configuration can change while the server runs.
+                problem = adapter.check_effort(member.model, member.effort, env, started + timeout)
+                if problem:
+                    return f"fixer: {member.id}: {problem}", True
+                with self.calls_lock:
+                    if request_id in self.cancelled:
+                        return f"fixer: {member.id}: cancelled", True
             if keep and not resume:
                 session = adapter.new_session(member, env)
             call = Call(member, prompt, session, resume, keep, timeout)
@@ -760,7 +878,8 @@ class Server:
             if cancelled_early:
                 _kill(process)
             try:
-                stdout, stderr = process.communicate(invocation.stdin, timeout=timeout)
+                stdout, stderr = process.communicate(invocation.stdin,
+                                                     timeout=max(started + timeout - time.monotonic(), 0))
             except subprocess.TimeoutExpired:
                 _kill(process)
                 process.communicate()
@@ -773,7 +892,7 @@ class Server:
                 os.unlink(prompt_file.name)
 
         elapsed = time.monotonic() - started
-        header = f"[{member.id} · {member.runner} {member.model} · {elapsed:.0f}s]"
+        header = f"[{member.id} · {member.runner} {_model(member)} · {elapsed:.0f}s]"
         try:
             answer, new_session = adapter.parse(stdout, call)
             failure = None
@@ -783,7 +902,7 @@ class Server:
             failure = f"exit status {process.returncode}" + (f" ({failure})" if failure else "")
         if failure is None and not answer.strip():
             failure = "no answer"
-        log_event(member=member.id, runner=member.runner, model=member.model,
+        log_event(member=member.id, runner=member.runner, model=member.model, effort=member.effort or None,
                   resumed=resume, seconds=round(elapsed, 1), exit_status=process.returncode,
                   ok=failure is None)
         if failure:
@@ -809,12 +928,16 @@ class Server:
             self.cancel(request_id)
 
 
+def _model(member: Member) -> str:
+    return f"{member.model}, effort {member.effort}" if member.effort else member.model
+
+
 def describe(team: Team) -> str:
     lines = [f"Team {team.name} ({team.path})",
              f"max_active={team.max_active} timeout={team.timeout_seconds}s"]
     for member in team.members.values():
         access = "read-only" if member.read_only else "writes"
-        lines.append(f"  {member.id}: {member.kind}, {member.runner} {member.model}, {access}")
+        lines.append(f"  {member.id}: {member.kind}, {member.runner} {_model(member)}, {access}")
     return "\n".join(lines)
 
 
@@ -828,7 +951,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        team = load_team(find_team(args.team))
+        team = load_team(find_team(args.team), check_efforts=args.command == "check")
         if args.command == "check":
             print(describe(team))
             return 0

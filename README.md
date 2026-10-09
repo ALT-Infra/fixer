@@ -124,6 +124,7 @@ timeout_seconds = 900   # time limit for one call
 kind = "peer"
 runner = "codex"
 model = "gpt-5.5"
+effort = "high"         # optional
 description = "Independent reviewer. Give it the diff or the file names."
 instructions = "Find correctness bugs. Give file:line for each bug."
 read_only = true        # the default value
@@ -138,6 +139,29 @@ read_only = true        # the default value
 | `instructions` | no | The role of the member. Fixer sends it on the first call. |
 | `read_only` | no | `true` is the default. `false` selects the write mode of the runner. |
 | `timeout_seconds` | no | This value replaces the Team value for this member. |
+| `effort` | no | The reasoning effort. Fixer gives it to the effort flag of the runner. Without it, the member uses the default of its CLI. |
+
+Fixer keeps no list of effort values. The CLI is the authority:
+
+- Codex and Cline refuse a value that they do not know. The call then
+  fails with their message.
+- Claude Code and OpenCode use their default effort for a value that they
+  do not know, and give no error. Thus Fixer asks them first. It runs
+  `claude --version` with and without `--effort`, and refuses the value if
+  Claude Code adds a warning. A third run with a value that no CLI accepts
+  must add output, or Fixer cannot check. This test only shows that Claude
+  Code adds output for a value; it is not a full check of Claude Code. For
+  OpenCode, the effort is a variant of the model: Fixer reads the variants
+  of the model from `opencode models --verbose`.
+- `fixer check` asks for each member. A running server asks at each call
+  of a member, inside the time limit of the call. Thus a CLI that cannot
+  answer stops only its member, and the call gives the reason.
+- For Claude Code, Fixer also sets `CLAUDE_CODE_EFFORT_LEVEL`, because that
+  variable has priority over `--effort`.
+
+Fixer sends the effort that you request. The model, or settings of the CLI,
+can still decrease it. fx has no effort setting in Fixer. Cursor puts the
+effort in the model name, for example `claude-opus-5-5-xhigh`.
 
 The tool name is the member id. An id has lowercase letters, digits, `-`,
 and `_`. Fixer refuses unknown keys. Thus `fixer check` finds a typing
@@ -167,7 +191,7 @@ argument contains `{prompt}`. The command must print only the answer.
   The member then reads the file.
 - A member can read all of your workspace. This includes the Team file.
 - `FIXER_LOG=/path` records each call as one JSON line: member, runner,
-  model, resume or new session, seconds, and exit status.
+  model, effort, resume or new session, seconds, and exit status.
 
 ## Known problems
 
@@ -223,14 +247,14 @@ After a change, do these steps:
 The adapters use these flags. The versions are the versions that Fixer
 was tested with.
 
-| CLI | Version | One-time call | Session | Read-only |
-| --- | --- | --- | --- | --- |
-| Claude Code | 2.1.289 | `-p --no-session-persistence` | `--session-id <uuid>`, then `--resume <uuid>` | default `-p` mode |
-| Codex | 0.160.0 | `exec --ephemeral` | id from `--json`, then `exec resume <id>` | `sandbox_mode="read-only"` |
-| OpenCode | 1.18.34 | `run` | id from `--format json`, then `--session <id>` | `--agent plan` |
-| fx | 0.0.12 | `ask --no-save` | id from `--json`, then `--resume-id <id>` | default mode |
-| Cline | 3.0.68 | `--json "<prompt>"` | not possible without a terminal | `--plan` |
-| Cursor | 2026.10.01 | `-p --output-format json` | `create-chat`, then `--resume <id>` | `--mode ask` |
+| CLI | Version | One-time call | Session | Read-only | Effort |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | 2.1.295 | `-p --no-session-persistence` | `--session-id <uuid>`, then `--resume <uuid>` | default `-p` mode | `--effort <level>` |
+| Codex | 0.162.0 | `exec --ephemeral` | id from `--json`, then `exec resume <id>` | `sandbox_mode="read-only"` | `-c model_reasoning_effort="<level>"` |
+| OpenCode | 1.18.34 | `run` | id from `--format json`, then `--session <id>` | `--agent plan` | `--variant <name>` |
+| fx | 0.0.12 | `ask --no-save` | id from `--json`, then `--resume-id <id>` | default mode | none |
+| Cline | 3.0.64 | `--json "<prompt>"` | not possible without a terminal | `--plan` | `--thinking <level>` |
+| Cursor | 2026.10.01 | `-p --output-format json` | `create-chat`, then `--resume <id>` | `--mode ask` | in the model name |
 
 ## Open items
 

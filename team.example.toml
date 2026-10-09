@@ -19,6 +19,7 @@ timeout_seconds = 900  # for one call; a member can set its own
 kind = "peer"
 runner = "codex"
 model = "gpt-5.5"
+effort = "high"        # optional; without it, the CLI's default effort
 description = "Independent reviewer on a different model. Ask before you call non-trivial work done. Pass the diff or name the files."
 instructions = """
 Review for correctness first: logic errors, unhandled cases, broken
