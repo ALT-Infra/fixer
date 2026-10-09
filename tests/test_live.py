@@ -104,12 +104,15 @@ def _make(runner: str):
         text, is_error = self.call(self.server, "peer", "What was the code word? Reply only with the word.")
         self.assertFalse(is_error, text)
         self.assertIn("ZEBRA-41", text)
-        self.call(self.server, "solo", "Remember the code word ZEBRA-41. Reply only with OK.")
-        text, _ = self.call(self.server, "solo", "What was the code word? Reply only with the word, or NONE.")
+        text, is_error = self.call(self.server, "solo", "Remember the code word ZEBRA-41. Reply only with OK.")
+        self.assertFalse(is_error, text)
+        text, is_error = self.call(self.server, "solo", "What was the code word? Reply only with the word, or NONE.")
+        self.assertFalse(is_error, text)  # a failed call does not know the word either
         self.assertNotIn("ZEBRA-41", text)
 
     def test_read_only_and_write_modes(self):
-        self.call(self.server, "solo", "Create a file named ro.txt that contains HELLO. Then reply DONE.")
+        text, is_error = self.call(self.server, "solo", "Create a file named ro.txt that contains HELLO. Then reply DONE.")
+        self.assertFalse(is_error, text)  # a failed call creates no file either
         self.assertFalse((self.workspace / "ro.txt").exists(), "a read-only member created a file")
         text, is_error = self.call(self.server, "writer", "Create a file named rw.txt that contains HELLO. Then reply DONE.")
         self.assertFalse(is_error, text)
