@@ -463,10 +463,7 @@ class OpenCodeAdapter(Adapter):
 
 
 class CursorAdapter(Adapter):
-    """Cursor CLI: cursor-agent -p. A session is a chat made by create-chat.
-
-    Written from cursor-agent's help text; not yet run with a real model.
-    """
+    """Cursor CLI: cursor-agent -p. A session is a chat made by create-chat."""
     name = "cursor"
     sessions = True
 

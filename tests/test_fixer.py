@@ -274,13 +274,14 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--auto", later.argv)
         self.assertEqual(fixer.ADAPTERS["fx"].parse((FIXTURES / "fx.json").read_text(), c), ("OK", "ncWnEvfmiGsE"))
 
-    def test_cursor_command_lines(self):
-        # No real Cursor output: Cursor is not tested with a real model.
-        one, _ = self.invoke("cursor", call("s"))
+    def test_cursor(self):
+        one, c = self.invoke("cursor", call("s"))
         self.assertEqual(one.argv[one.argv.index("--mode") + 1], "ask")
         later, _ = self.invoke("cursor", call("p", read_only=False), session="chat-1", resume=True, keep=True)
         self.assertEqual(later.argv[later.argv.index("--resume") + 1], "chat-1")
         self.assertIn("--force", later.argv)
+        self.assertEqual(fixer.ADAPTERS["cursor"].parse((FIXTURES / "cursor.json").read_text(), c),
+                         ("PONG", "af4c9f09-bffa-4fc1-9dd7-bc8eb578e976"))
 
 
 class Harness:

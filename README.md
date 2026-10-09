@@ -41,7 +41,7 @@ primary knows what it must send. Members do not consult other members.
 ## Supported CLIs
 
 A CLI can be the host, a runner, or both. These results come from tests
-with real models on 2026-10-04.
+with real models on 2026-10-04, and for Cursor on 2026-10-09.
 
 | CLI | As host | Specialist | Peer | Read-only stops edits | Read-only stops shell commands |
 | --- | --- | --- | --- | --- | --- |
@@ -50,14 +50,15 @@ with real models on 2026-10-04.
 | OpenCode (`opencode`) | tested | tested | tested | yes | **no** |
 | fx (`fx`) | tested | tested | tested | yes | yes |
 | Cline (`cline`) | not tested | tested | **not possible** | yes | **no** |
-| Cursor (`cursor-agent`) | not tested | not tested | not tested | — | — |
+| Cursor (`cursor-agent`) | not tested | tested | tested | yes | see the note |
 
 - Cline cannot continue a session without a terminal. Thus Cline can run
   only specialists.
 - On OpenCode and Cline, a read-only member can run shell commands. Give
   these members only tasks where this is safe.
-- Cursor support comes from its help text. Cursor did not run with a real
-  model.
+- The Cursor tests used the model `auto`. A read-only Cursor member refused
+  to run `touch` in a shell. The test does not show if the tool or the
+  model stopped the command.
 - The fx tests used fx 0.0.12 with a Cline connection. The fx runner uses
   only standard fx flags.
 
@@ -258,11 +259,9 @@ was tested with.
 
 ## Open items
 
-1. Test Cursor with a real account. A fault will probably be in its
-   adapter: a flag, a JSON field name, or session resume.
-2. Find a way for Cline peers. `cline --acp` keeps a live session. It is
+1. Find a way for Cline peers. `cline --acp` keeps a live session. It is
    not tested.
-3. Add an install command, so that users do not need a file path.
+2. Add an install command, so that users do not need a file path.
 
 ## History
 
