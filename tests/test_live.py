@@ -137,7 +137,7 @@ def _make(runner: str):
             member = dataclasses.replace(self.team.members["solo"], effort="max")
             invocation = adapter.invoke(fixer.Call(member, "Run this exact command with the Bash tool: "
                                                    "printenv CLAUDE_EFFORT  Reply with only its output.",
-                                                   None, False, False, 300))
+                                                   None, False, False))
             done = subprocess.run(invocation.argv + ["--allowedTools", "Bash(printenv:*)"], input=invocation.stdin,
                                   capture_output=True, text=True, timeout=300,
                                   env={**env, "CLAUDE_CODE_EFFORT_LEVEL": "low", **invocation.env})
@@ -146,7 +146,7 @@ def _make(runner: str):
             return
         # Codex's API and Cline refuse the value; either way the output names it.
         member = dataclasses.replace(self.team.members["solo"], effort="bogus")
-        invocation = adapter.invoke(fixer.Call(member, "Reply with exactly: PONG-3", None, False, False, 300))
+        invocation = adapter.invoke(fixer.Call(member, "Reply with exactly: PONG-3", None, False, False))
         done = subprocess.run(invocation.argv, input=invocation.stdin, capture_output=True, text=True,
                               timeout=300, env={**env, **invocation.env})
         print(f"\n--- solo with effort bogus: exit {done.returncode}\n{(done.stderr + done.stdout)[:400]}")

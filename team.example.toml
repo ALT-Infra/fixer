@@ -13,7 +13,7 @@
 
 name = "engineering"
 max_active = 4         # member runs at the same time, across the Team
-timeout_seconds = 900  # for one call; a member can set its own
+                       # a call has no time limit
 
 [members.reviewer]
 kind = "peer"
