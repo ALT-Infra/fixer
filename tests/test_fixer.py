@@ -29,9 +29,9 @@ class FakeAdapter(fixer.Adapter):
     sessions = True
     takes_effort = True
 
-    def check_effort(self, model, effort, env, deadline):
-        if effort == "slow":
-            time.sleep(1.5)
+    def check_effort(self, model, effort, env, track=None):
+        if effort == "hang":  # a CLI that does not answer until the call is cancelled
+            fixer._probe([sys.executable, "-c", "import time; time.sleep(60)"], env, track)
         return f"the fake CLI refuses effort '{effort}'" if effort == "bad" else None
 
     def invoke(self, call):
@@ -100,6 +100,11 @@ class TeamFileTests(unittest.TestCase):
     def test_unknown_keys_are_rejected(self):
         self.rejected(TEAM.replace('model = "model-b"', 'model = "model-b"\nconsults = ["reviewer"]'),
                       "unknown key(s) consults")
+
+    def test_a_call_has_no_time_limit(self):
+        self.rejected("timeout_seconds = 900\n" + TEAM, "no time limit for a call any more")
+        self.rejected(TEAM.replace('model = "model-b"', 'model = "model-b"\ntimeout_seconds = 900'),
+                      "members.scout: Fixer has no time limit for a call any more; remove 'timeout_seconds'")
 
     def test_kind_is_required_and_checked(self):
         self.rejected(TEAM.replace('kind = "specialist"\n', ""), "missing 'kind'")
@@ -195,7 +200,7 @@ class AdapterTests(unittest.TestCase):
     """Command lines for each mode, and parsing of real CLI output."""
 
     def invoke(self, name, member, session=None, resume=False, keep=False):
-        c = fixer.Call(member, "PROMPT", session, resume, keep, 60)
+        c = fixer.Call(member, "PROMPT", session, resume, keep)
         return fixer.ADAPTERS[name].invoke(c), c
 
     def test_claude(self):
@@ -276,7 +281,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_output_without_proof_of_success_fails(self):
         # Real outputs with the CLI's sign of success taken out: a partial answer must not pass.
-        c = fixer.Call(call("s"), "PROMPT", None, False, False, 60)
+        c = fixer.Call(call("s"), "PROMPT", None, False, False)
         lines = lambda name, drop: "\n".join(l for l in (FIXTURES / name).read_text().splitlines() if drop not in l)
 
         def result(name, change):
@@ -412,11 +417,15 @@ class ServerTests(unittest.TestCase):
         text, is_error = h.text("scout", task="Look.")  # the other members still work
         self.assertFalse(is_error, text)
 
-    def test_the_effort_check_counts_in_the_calls_time_limit(self):
-        h = self.serve(TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "slow"\ntimeout_seconds = 1'))
-        text, is_error = h.text("reviewer", task="Look.")
-        self.assertTrue(is_error)
-        self.assertIn("did not finish within 1s", text)
+    def test_cancellation_stops_the_effort_check(self):
+        h = self.serve(TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "hang"'))
+        request_id = h.send("tools/call", {"name": "reviewer", "arguments": {"task": "Look."}})
+        time.sleep(0.5)
+        h.send("notifications/cancelled", {"requestId": request_id}, notify=True)
+        time.sleep(1)
+        self.assertEqual(h.wait(h.send("ping"))["result"], {})
+        self.assertFalse(any(m.get("id") == request_id for m in h.messages()))
+        self.assertFalse(list((self.dir / "run").rglob("*.slot")))  # the check ended, so the call did
 
     def test_the_effort_check_waits_for_a_free_slot(self):
         h = self.serve("max_active = 1\n" + TEAM.replace('instructions = "Be blunt."', 'instructions = "Be blunt."\neffort = "bad"'))
@@ -512,12 +521,6 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(h.wait(h.send("ping"))["result"], {})
         self.assertFalse(any(m.get("id") == request_id for m in h.messages()))
         self.assertFalse(list((self.dir / "run").rglob("*.slot")))
-
-    def test_timeout(self):
-        h = self.start(TEAM.replace('model = "model-b"', 'model = "model-b"\ntimeout_seconds = 1'))
-        text, is_error = h.text("scout", task="SLEEP 10")
-        self.assertTrue(is_error)
-        self.assertIn("did not finish within 1s", text)
 
     def test_max_active(self):
         h = self.start("max_active = 1\n" + TEAM)

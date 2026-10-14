@@ -64,7 +64,6 @@ class Member:
     description: str
     instructions: str = ""
     read_only: bool = True
-    timeout_seconds: int | None = None
     effort: str = ""          # empty: the CLI's own default
 
 
@@ -75,7 +74,6 @@ class Team:
     members: dict[str, Member]
     commands: dict[str, tuple[str, ...]] = field(default_factory=dict)
     max_active: int = 6
-    timeout_seconds: int = 900
     env: dict[str, str] = field(default_factory=dict)
 
     def adapter(self, member: Member) -> "Adapter":
@@ -107,6 +105,12 @@ def _reject_unknown(table: dict, allowed: set[str], where: str) -> None:
         raise TeamError(f"{where}: unknown key(s) {', '.join(unknown)}")
 
 
+def _refuse_time_limit(table: dict, where: str) -> None:
+    # A call runs until its member finishes or the host cancels it.
+    if "timeout_seconds" in table:
+        raise TeamError(f"{where}: Fixer has no time limit for a call any more; remove 'timeout_seconds'")
+
+
 def _positive_int(table: dict, key: str, default: int | None, where: str) -> int | None:
     value = table.get(key, default)
     if value is None:
@@ -128,8 +132,8 @@ def load_team(path: Path, check_efforts: bool = True) -> Team:
     except tomllib.TOMLDecodeError as err:
         raise TeamError(f"{path}: {err}") from None
 
-    _reject_unknown(raw, {"name", "max_active", "timeout_seconds", "env", "commands", "members"},
-                    str(path))
+    _refuse_time_limit(raw, str(path))
+    _reject_unknown(raw, {"name", "max_active", "env", "commands", "members"}, str(path))
 
     env = raw.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
@@ -154,8 +158,9 @@ def load_team(path: Path, check_efforts: bool = True) -> Team:
             raise TeamError(f"{where}: '{PRIMARY}' is the host agent")
         if not isinstance(spec, dict):
             raise TeamError(f"{where} must be a table")
+        _refuse_time_limit(spec, where)
         _reject_unknown(spec, {"kind", "runner", "model", "description", "instructions",
-                               "read_only", "timeout_seconds", "effort"}, where)
+                               "read_only", "effort"}, where)
         kind = _text(spec, "kind", where)
         if kind not in KINDS:
             raise TeamError(f"{where}: 'kind' must be 'peer' or 'specialist'")
@@ -172,7 +177,7 @@ def load_team(path: Path, check_efforts: bool = True) -> Team:
             raise TeamError(f"{where}: runner '{runner}' has no effort setting in Fixer")
         if effort and check_efforts:
             problem = adapter.check_effort(_text(spec, "model", where), effort,
-                                           {**os.environ, **env, "PWD": os.getcwd()}, time.monotonic() + 120)
+                                           {**os.environ, **env, "PWD": os.getcwd()})
             if problem:
                 raise TeamError(f"{where}: {problem}")
         member = Member(
@@ -181,7 +186,6 @@ def load_team(path: Path, check_efforts: bool = True) -> Team:
             description=_text(spec, "description", where),
             instructions=_text(spec, "instructions", where, required=False),
             read_only=read_only,
-            timeout_seconds=_positive_int(spec, "timeout_seconds", None, where),
             effort=effort,
         )
         if kind == "peer" and not adapter.sessions:
@@ -197,7 +201,6 @@ def load_team(path: Path, check_efforts: bool = True) -> Team:
         members=members,
         commands=commands,
         max_active=_positive_int(raw, "max_active", 6, str(path)),
-        timeout_seconds=_positive_int(raw, "timeout_seconds", 900, str(path)),
         env=env,
     )
 
@@ -228,7 +231,6 @@ class Call:
     session: str | None       # session to resume, or a new id the adapter chose
     resume: bool              # True: continue `session`; False: start fresh
     keep: bool                # True: the CLI must save the session for later calls
-    timeout: int
 
 
 @dataclass
@@ -252,21 +254,25 @@ class Adapter:
         """Return (answer, session id)."""
         raise NotImplementedError
 
-    def new_session(self, member: Member, env: dict) -> str | None:
-        """Create a session before the first call, for CLIs that need it."""
+    def new_session(self, member: Member, env: dict, track=None) -> str | None:
+        """Create a session before the first call, for CLIs that need it.
+        `track` is as for check_effort."""
         return str(uuid.uuid4()) if self.chooses_session_id else None
 
-    def check_effort(self, model: str, effort: str, env: dict, deadline: float) -> str | None:
+    def check_effort(self, model: str, effort: str, env: dict, track=None) -> str | None:
         """Why the CLI would not run `model` at `effort`, or None. Fixer keeps no
         list of values: a CLI that refuses an unknown value itself gets it as
         given, and the call fails with its message. A CLI that ignores one
-        without an error overrides this to ask the CLI first."""
+        without an error overrides this to ask the CLI first. `track` gets each
+        process that the check starts (see _probe)."""
         return None
 
 
-def _probe(argv: list[str], env: dict, deadline: float):
-    """Run a CLI to ask it something, by `deadline` (time.monotonic()): (its
-    output, None), or (None, why it could not answer)."""
+def _probe(argv: list[str], env: dict, track=None):
+    """Run a CLI to ask it something: (its output, None), or (None, why it
+    could not answer). It has no time limit. `track`, if given, gets the
+    process when it starts and None when it has ended, so that a cancelled
+    call can stop it."""
     try:
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, env=env, cwd=env.get("PWD"), start_new_session=True)
@@ -274,12 +280,13 @@ def _probe(argv: list[str], env: dict, deadline: float):
         return None, f"{argv[0]} is not installed"
     except OSError as err:
         return None, f"cannot run {argv[0]}: {err.strerror}"
+    if track:
+        track(process)
     try:
-        stdout, stderr = process.communicate(timeout=max(deadline - time.monotonic(), 0))
-    except subprocess.TimeoutExpired:
-        _kill(process)
-        process.communicate()
-        return None, f"'{' '.join(argv)}' did not finish in time"
+        stdout, stderr = process.communicate()
+    finally:
+        if track:
+            track(None)
     if process.returncode != 0:
         return None, f"'{' '.join(argv)}' failed with exit status {process.returncode}: {stderr.strip()[-300:]}"
     return subprocess.CompletedProcess(argv, 0, stdout, stderr), None
@@ -342,7 +349,7 @@ class ClaudeAdapter(Adapter):
             raise MemberError("the result does not say that the call succeeded")
         return str(result.get("result") or ""), result.get("session_id")
 
-    def check_effort(self, model, effort, env, deadline):
+    def check_effort(self, model, effort, env, track=None):
         # Claude Code runs an unknown effort at its default without an error but
         # warns, even with --version: what --effort adds is its complaint. A
         # value no CLI accepts must add something, or the check tells nothing.
@@ -350,7 +357,7 @@ class ClaudeAdapter(Adapter):
         runs = {}
         for name, flags in (("plain", ()), ("tried", ("--effort", effort)),
                             ("control", ("--effort", f"fixer-control-{uuid.uuid4().hex[:8]}"))):
-            done, why = _probe(["claude", *flags, "--version"], env, deadline)
+            done, why = _probe(["claude", *flags, "--version"], env, track)
             if why:
                 return f"Fixer cannot check the effort: {why}"
             runs[name] = collections.Counter((done.stdout + done.stderr).splitlines())
@@ -441,8 +448,8 @@ class OpenCodeAdapter(Adapter):
             raise MemberError(f"opencode's last step ended with {reason or 'no finish'}, not stop")
         return "".join(texts), session
 
-    def check_effort(self, model, effort, env, deadline):
-        done, why = _probe(["opencode", "models", "--verbose"], env, deadline)
+    def check_effort(self, model, effort, env, track=None):
+        done, why = _probe(["opencode", "models", "--verbose"], env, track)
         if why:
             return f"Fixer cannot check the effort: {why}"
         try:
@@ -488,12 +495,11 @@ class CursorAdapter(Adapter):
             argv += ["--force"]
         return Invocation(argv + [call.prompt])
 
-    def new_session(self, member, env):
-        done = subprocess.run(["cursor-agent", "create-chat"], capture_output=True, text=True,
-                              env=env, timeout=60, stdin=subprocess.DEVNULL)
-        chat = done.stdout.strip().splitlines()[-1:] if done.returncode == 0 else []
+    def new_session(self, member, env, track=None):
+        done, why = _probe(["cursor-agent", "create-chat"], env, track)
+        chat = done.stdout.strip().splitlines()[-1:] if done else []
         if not chat:
-            raise MemberError(f"cursor-agent create-chat failed: {done.stderr.strip()[-500:]}")
+            raise MemberError(f"cursor-agent create-chat failed: {why or 'it printed no chat id'}")
         return chat[0].strip()
 
     def parse(self, stdout, call):
@@ -845,7 +851,6 @@ class Server:
 
     def run(self, request_id, member: Member, task: str, context: str, keep: bool) -> tuple[str, bool]:
         adapter = self.team.adapter(member)
-        timeout = member.timeout_seconds or self.team.timeout_seconds
         # Members work in this server's directory. Some CLIs (OpenCode) trust
         # $PWD over the real working directory, so set both.
         workspace = os.getcwd()
@@ -860,21 +865,30 @@ class Server:
         if slot is None:
             return (f"fixer: {self.team.max_active} members are already running for this team; "
                     "wait for one to finish or raise max_active"), True
+        def track(process: subprocess.Popen | None) -> None:
+            # The process of this call that a cancel stops: the effort check, the
+            # session setup, then the member itself. None between them.
+            with self.calls_lock:
+                self.calls[request_id] = process
+                cancelled = request_id in self.cancelled
+            if process is not None and cancelled:
+                _kill(process)
+
         prompt_file = None
         started = time.monotonic()
         try:
             if member.effort:
-                # Asked at every call, within its slot and time limit: a CLI or its
-                # configuration can change while the server runs.
-                problem = adapter.check_effort(member.model, member.effort, env, started + timeout)
+                # Asked at every call, within its slot: a CLI or its configuration
+                # can change while the server runs.
+                problem = adapter.check_effort(member.model, member.effort, env, track)
                 if problem:
                     return f"fixer: {member.id}: {problem}", True
                 with self.calls_lock:
                     if request_id in self.cancelled:
                         return f"fixer: {member.id}: cancelled", True
             if keep and not resume:
-                session = adapter.new_session(member, env)
-            call = Call(member, prompt, session, resume, keep, timeout)
+                session = adapter.new_session(member, env, track)
+            call = Call(member, prompt, session, resume, keep)
             invocation = adapter.invoke(call)
             if invocation.stdin is None and len(prompt.encode()) > MAX_ARG_PROMPT:
                 prompt_file = tempfile.NamedTemporaryFile("w", prefix="fixer-task-", suffix=".md", delete=False)
@@ -892,18 +906,9 @@ class Server:
                     start_new_session=True)
             except OSError as err:
                 return f"fixer: could not start {member.id} ({invocation.argv[0]}): {err.strerror}", True
-            with self.calls_lock:
-                self.calls[request_id] = process
-                cancelled_early = request_id in self.cancelled
-            if cancelled_early:
-                _kill(process)
-            try:
-                stdout, stderr = process.communicate(invocation.stdin,
-                                                     timeout=max(started + timeout - time.monotonic(), 0))
-            except subprocess.TimeoutExpired:
-                _kill(process)
-                process.communicate()
-                return f"fixer: {member.id} did not finish within {timeout}s", True
+            track(process)
+            # No time limit: the member runs until it finishes or the host cancels the call.
+            stdout, stderr = process.communicate(invocation.stdin)
         except MemberError as err:
             return f"fixer: {member.id}: {err}", True
         finally:
@@ -957,7 +962,7 @@ def _model(member: Member) -> str:
 
 def describe(team: Team) -> str:
     lines = [f"Team {team.name} ({team.path})",
-             f"max_active={team.max_active} timeout={team.timeout_seconds}s"]
+             f"max_active={team.max_active}"]
     for member in team.members.values():
         access = "read-only" if member.read_only else "writes"
         lines.append(f"  {member.id}: {member.kind}, {member.runner} {_model(member)}, {access}")

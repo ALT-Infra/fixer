@@ -91,16 +91,17 @@ Do these steps:
    | Claude Code | `claude mcp add fixer -- python3 /path/to/fixer.py serve` |
    | Codex | `codex mcp add fixer -- python3 /path/to/fixer.py serve` |
    | OpenCode | `opencode.json`: `{"mcp": {"fixer": {"type": "local", "command": ["python3", "/path/to/fixer.py", "serve"]}}}` |
-   | fx | `.mcp.json`: `{"mcpServers": {"fixer": {"command": "python3", "args": ["/path/to/fixer.py", "serve"], "operation_timeout_ms": 900000}}}`. Then run `fx mcp trust approve fixer`. |
+   | fx | `.mcp.json`: `{"mcpServers": {"fixer": {"command": "python3", "args": ["/path/to/fixer.py", "serve"], "operation_timeout_ms": 86400000}}}`. Then run `fx mcp trust approve fixer`. |
 
 5. Start the host in the project directory. The members work there.
    Fixer reads the Team file from `--team`, then from `FIXER_TEAM`, then
    from `.fixer/team.toml` or `fixer.toml` in that directory.
-6. Increase the time limit of the host for MCP tools. One member call can
-   take some minutes.
-   - Claude Code: set `MCP_TOOL_TIMEOUT=900000` (milliseconds).
+6. Increase the time limit of the host for MCP tools. Fixer gives a call
+   no time limit: a member runs until it finishes, which can take an hour
+   at a high effort. The host can still stop the call at its own limit.
+   - Claude Code: set `MCP_TOOL_TIMEOUT=86400000` (milliseconds).
    - Codex: in `~/.codex/config.toml`, under `[mcp_servers.fixer]`, set
-     `tool_timeout_sec = 900`.
+     `tool_timeout_sec = 86400`.
    - fx: set `operation_timeout_ms` in `.mcp.json`, as in step 4.
 7. Approve the Fixer tools. A host that runs without a terminal cannot ask
    for approval, so approve the tools before you start it:
@@ -119,7 +120,6 @@ Then use your host as usual. The primary calls a member in three cases:
 ```toml
 name = "engineering"
 max_active = 4          # member runs at the same time
-timeout_seconds = 900   # time limit for one call
 
 [members.reviewer]
 kind = "peer"
@@ -139,7 +139,6 @@ read_only = true        # the default value
 | `description` | yes | The primary sees this text. Tell the primary when to call this member. |
 | `instructions` | no | The role of the member. Fixer sends it on the first call. |
 | `read_only` | no | `true` is the default. `false` selects the write mode of the runner. |
-| `timeout_seconds` | no | This value replaces the Team value for this member. |
 | `effort` | no | The reasoning effort. Fixer gives it to the effort flag of the runner. Without it, the member uses the default of its CLI. |
 
 Fixer keeps no list of effort values. The CLI is the authority:
@@ -155,8 +154,8 @@ Fixer keeps no list of effort values. The CLI is the authority:
   OpenCode, the effort is a variant of the model: Fixer reads the variants
   of the model from `opencode models --verbose`.
 - `fixer check` asks for each member. A running server asks at each call
-  of a member, inside the time limit of the call. Thus a CLI that cannot
-  answer stops only its member, and the call gives the reason.
+  of a member. Thus a CLI that refuses or fails stops only its member,
+  and the call gives the reason.
 - For Claude Code, Fixer also sets `CLAUDE_CODE_EFFORT_LEVEL`, because that
   variable has priority over `--effort`.
 
@@ -182,8 +181,11 @@ argument contains `{prompt}`. The command must print only the answer.
 
 - `max_active` sets the maximum number of member runs at the same time,
   for each Team, across all processes.
-- Each call has a time limit. If the host stops a call, or if the host
-  itself stops, Fixer stops the process group of the member.
+- A call has no time limit: the member runs until it finishes. Fixer
+  refuses a Team file with `timeout_seconds`, because that key no longer
+  has an effect. If the host stops a call, or if the host itself stops,
+  Fixer stops the process group of the member. This is also true during
+  the effort check and the creation of a session.
 - Each member works in the directory of the server. Fixer sets the working
   directory and `PWD` to the same value, because OpenCode uses `PWD`.
 - Fixer sets `FIXER_MEMBER` for each member. If the CLI of a member loads
